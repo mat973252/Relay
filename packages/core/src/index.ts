@@ -13,3 +13,23 @@ export {
   type RunDoctorInput,
 } from "./doctor.js";
 export { formatDoctorJson, formatDoctorReport } from "./format.js";
+export {
+  AmbiguousEffectError,
+  EffectNeedsReconciliationError,
+  SimulatedProcessDeath,
+  hashRequest,
+  runEffect,
+  stableStringify,
+  type CrashInjection,
+  type CrashPoint,
+  type EffectExecuteContext,
+  type EffectJournal,
+  type EffectOutcome,
+  type EffectRecord,
+  type EffectStatus,
+  type InFlightCrashPoint,
+  type ReconcileOutcome,
+  type ReplayPolicy,
+  type RunEffectInput,
+  type RunnerCrashPoint,
+} from "./effect.js";
