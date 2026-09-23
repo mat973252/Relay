@@ -1,0 +1,18 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "composite": true,
+    "rootDir": ".",
+    "outDir": "dist",
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true
+  },
+  "include": ["src/**/*", "test/**/*"],
+  "exclude": ["dist"],
+  "references": [
+    { "path": "../core" },
+    { "path": "../storage-sqlite" },
+    { "path": "../artifact-fs" }
+  ]
+}

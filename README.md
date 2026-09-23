@@ -37,12 +37,20 @@ Relay v0.1 proves four milestones:
 
 No Java/Go/Rust in v0.1.
 
-## Local target
+## Local workspace
 
-Default personal workspace:
+Everything runs from the repository root; no machine-specific paths are embedded:
 
-```text
-D:\code\relay
+```powershell
+corepack pnpm install
+corepack pnpm check   # typecheck + tests
+node packages/cli/dist/src/cli.js doctor
+```
+
+The M0 bootstrap script derives the repository root from its own location:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/start-relay-m0.ps1
 ```
 
 See `AGENTS.md` and `tasks/` before implementation.

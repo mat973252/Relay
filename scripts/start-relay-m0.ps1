@@ -1,6 +1,7 @@
 $ErrorActionPreference = "Stop"
 
-$Repo = "D:\code\relay"
+# Derive the repository root from this script's location (scripts/ -> repo root).
+$Repo = Split-Path -Parent $PSScriptRoot
 
 Write-Host "== Relay M0 bootstrap =="
 Write-Host "Workspace: $Repo"

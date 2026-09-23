@@ -3,9 +3,19 @@
   "private": true,
   "version": "0.0.0",
   "packageManager": "pnpm@10.33.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "typecheck": "tsc -b",
-    "test": "node --test",
-    "check": "pnpm typecheck && pnpm test"
+    "test": "pnpm -r --if-present test",
+    "check": "pnpm typecheck && pnpm test",
+    "relay": "node packages/cli/dist/src/cli.js",
+    "clean": "tsc -b --clean"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
   }
 }

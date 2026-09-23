@@ -14,11 +14,7 @@ Before implementation:
 
 ## Repository
 
-Work in:
-
-```text
-D:\code\relay
-```
+Work in the repository root that contains this `prompts/` directory. Derive it from the session working directory; do not hard-code machine-specific absolute paths.
 
 ## Required reading order
 

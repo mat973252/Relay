@@ -1,0 +1,20 @@
+{
+  "name": "@relay/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "relay": "./dist/src/cli.js"
+  },
+  "scripts": {
+    "test": "tsc -b . && node --test \"dist/**/*.test.js\""
+  },
+  "dependencies": {
+    "@relay/artifact-fs": "workspace:*",
+    "@relay/core": "workspace:*",
+    "@relay/storage-sqlite": "workspace:*"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

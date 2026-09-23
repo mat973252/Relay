@@ -64,6 +64,13 @@ For each milestone:
 
 Do not continue to the next milestone if the current milestone gate fails.
 
+## Persistent-state invariants
+
+- **Derived, never narrated.** Persist evidence (events, artifacts, real command results), never recomputable prose such as progress percentages, code summaries, or test claims.
+- **No documentation duplication.** Do not create natural-language mirrors of the source tree. Persist only intent, invariants, decisions/tradeoffs, and real test evidence.
+- **Persistent Context has a budget.** Do not build project-wide spec/context loading systems.
+- **No Delta, No Attention** is reserved for the epistemic stage (Delta entity comes first; no attention queues before it exists).
+
 ## Primary invariant
 
 The worst failure is not a crash. The worst failure is a crash followed by an invisible duplicate side effect.
