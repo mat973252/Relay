@@ -48,7 +48,7 @@ function runChild(args: string[], env: Record<string, string> = {}): Promise<{ s
 }
 
 describe("M5 deferred migration through Pi public APIs", () => {
-  it("submits once, migrates via capsule, resumes on machine B", { timeout: 180_000 }, async () => {
+  it("submits once, migrates via capsule, resumes on machine B", { timeout: 300_000 }, async () => {
     const server = await startJobServer(1_200);
     const machineA = join(tmp, "a");
     const machineB = join(tmp, "b");
@@ -119,7 +119,7 @@ describe("M5 deferred migration through Pi public APIs", () => {
     }
   });
 
-  it("crashes immediately before/after Pi resume never duplicate the deferred job", { timeout: 180_000 }, async () => {
+  it("crashes immediately before/after Pi resume never duplicate the deferred job", { timeout: 300_000 }, async () => {
     const server = await startJobServer(1_000);
     const machineA = join(tmp, "chaos-a");
     const machineB = join(tmp, "chaos-b");

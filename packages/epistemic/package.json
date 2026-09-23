@@ -1,5 +1,5 @@
 {
-  "name": "@relay/storage-sqlite",
+  "name": "@relay/epistemic",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -13,10 +13,6 @@
   },
   "scripts": {
     "test": "tsc -b . && node --test \"dist/**/*.test.js\""
-  },
-  "dependencies": {
-    "@relay/core": "workspace:*",
-    "@relay/epistemic": "workspace:*"
   },
   "engines": {
     "node": ">=22"

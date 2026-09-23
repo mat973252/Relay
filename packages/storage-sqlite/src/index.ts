@@ -51,3 +51,4 @@ export async function probeSqliteStorage(options: StorageProbeOptions): Promise<
     return { status: "fail", detail: `sqlite probe failed at ${path}: ${message}${hint}` };
   }
 }
+export { SqliteEpistemicStore, type SqliteEpistemicStoreOptions } from "./epistemic-store.js";

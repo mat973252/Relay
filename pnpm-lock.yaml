@@ -60,11 +60,16 @@ importers:
 
   packages/core: {}
 
+  packages/epistemic: {}
+
   packages/storage-sqlite:
     dependencies:
       '@relay/core':
         specifier: workspace:*
         version: link:../core
+      '@relay/epistemic':
+        specifier: workspace:*
+        version: link:../epistemic
 
 packages:
 

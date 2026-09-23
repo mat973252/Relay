@@ -1,11 +1,24 @@
 {
   "files": [],
   "references": [
-    { "path": "packages/core" },
-    { "path": "packages/storage-sqlite" },
-    { "path": "packages/artifact-fs" },
-    { "path": "packages/adapter-pi" },
-    { "path": "packages/cli" }
+    {
+      "path": "packages/core"
+    },
+    {
+      "path": "packages/epistemic"
+    },
+    {
+      "path": "packages/storage-sqlite"
+    },
+    {
+      "path": "packages/artifact-fs"
+    },
+    {
+      "path": "packages/adapter-pi"
+    },
+    {
+      "path": "packages/cli"
+    }
   ],
   "compilerOptions": {
     "target": "ES2022",
