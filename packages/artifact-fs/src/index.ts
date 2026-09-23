@@ -35,3 +35,14 @@ export async function probeArtifactRoot(options: ArtifactProbeOptions): Promise<
     return { status: "fail", detail: `artifact probe failed at ${root}: ${message}` };
   }
 }
+export {
+  ArtifactStore,
+  type ArtifactWriteCrashPoint,
+  type ArtifactProducer,
+  type ArtifactRecord,
+  type ArtifactRefs,
+  type ArtifactStoreOptions,
+  type IntegrityReport,
+  type LineageNode,
+  type WriteArtifactInput,
+} from "./store.js";
