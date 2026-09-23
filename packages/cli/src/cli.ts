@@ -25,6 +25,8 @@ import {
 import { probeSqliteStorage } from "@relay/storage-sqlite";
 import { ArtifactStore, probeArtifactRoot, type ArtifactRecord, type LineageNode } from "@relay/artifact-fs";
 import { evaluateCapabilitiesFile } from "./capabilities.js";
+import { exportCapsule, importCapsule } from "./capsule.js";
+import { SqliteEffectJournal } from "@relay/storage-sqlite";
 
 const USAGE = `relay — durable execution continuity for AI agents (M2)
 
@@ -32,6 +34,10 @@ usage:
   relay doctor [--json] [--storage PATH] [--artifacts PATH] [--capabilities PATH]
   relay artifacts [--json] [--artifacts PATH]
   relay lineage <artifact-ref> [--json] [--artifacts PATH]
+  relay effects [--json] [--storage PATH]
+  relay export [--output PATH] [--capabilities PATH] [--adapter-context PATH]
+               [--workspace PATH]
+  relay import <capsule> [--workspace PATH] [--overwrite]
   relay --help
 
 <artifact-ref> accepts a record id, a sha256 digest, or artifact://sha256/<digest>
@@ -166,6 +172,91 @@ async function runArtifactsCommand(rest: string[], cwd: string): Promise<number>
   return 0;
 }
 
+async function runEffectsCommand(rest: string[], cwd: string): Promise<number> {
+  let json = false;
+  let storage: string | undefined;
+  for (let i = 0; i < rest.length; i++) {
+    const arg = rest[i];
+    if (arg === undefined) break;
+    if (arg === "--json") json = true;
+    else if (arg === "--storage") {
+      storage = requireValue(rest, i + 1, "--storage");
+      i += 1;
+    } else usageError(`unknown argument for effects: ${arg}`);
+  }
+  const journal = await SqliteEffectJournal.open({ path: storage ?? join(cwd, ".relay", "storage.db") });
+  try {
+    const records = await journal.list();
+    if (json) {
+      process.stdout.write(`${JSON.stringify({ schema: "relay.effects/1", effects: records })}\n`);
+    } else if (records.length === 0) {
+      process.stdout.write("(no effects)\n");
+    } else {
+      for (const record of records) {
+        const ref = record.remoteRef === undefined ? "" : ` remote=${record.remoteRef}`;
+        process.stdout.write(`${record.status.padEnd(9)} ${record.key}${ref}  ${record.id}\n`);
+      }
+    }
+    return 0;
+  } finally {
+    journal.close();
+  }
+}
+
+async function runExportCommand(rest: string[], cwd: string): Promise<number> {
+  let output: string | undefined;
+  let workspace: string | undefined;
+  let capabilities: string | undefined;
+  let adapterContext: string | undefined;
+  for (let i = 0; i < rest.length; i++) {
+    const arg = rest[i];
+    if (arg === undefined) break;
+    if (arg === "--output") { output = requireValue(rest, i + 1, "--output"); i += 1; }
+    else if (arg === "--workspace") { workspace = requireValue(rest, i + 1, "--workspace"); i += 1; }
+    else if (arg === "--capabilities") { capabilities = requireValue(rest, i + 1, "--capabilities"); i += 1; }
+    else if (arg === "--adapter-context") { adapterContext = requireValue(rest, i + 1, "--adapter-context"); i += 1; }
+    else usageError(`unknown argument for export: ${arg}`);
+  }
+  const ws = workspace ?? cwd;
+  const result = await exportCapsule({
+    workspace: ws,
+    output: output ?? join(cwd, "relay-capsule.tar.gz"),
+    capabilitiesPath: capabilities,
+    adapterContextPath: adapterContext,
+  });
+  process.stdout.write(
+    `exported ${result.capsulePath}\nmanifest ${result.manifestSha256}\nentries ${result.entryCount}  effects ${result.manifest.counts.effects}  artifact records ${result.manifest.counts.artifactRecords}\n`,
+  );
+  return 0;
+}
+
+async function runImportCommand(rest: string[], cwd: string): Promise<number> {
+  let workspace: string | undefined;
+  let overwrite = false;
+  const positional: string[] = [];
+  for (let i = 0; i < rest.length; i++) {
+    const arg = rest[i];
+    if (arg === undefined) break;
+    if (arg === "--workspace") { workspace = requireValue(rest, i + 1, "--workspace"); i += 1; }
+    else if (arg === "--overwrite") overwrite = true;
+    else if (arg.startsWith("--")) usageError(`unknown argument for import: ${arg}`);
+    else positional.push(arg);
+  }
+  if (positional.length !== 1) usageError("import requires exactly one <capsule> path");
+  const capsule = positional[0] ?? "";
+  const ws = workspace ?? cwd;
+  try {
+    const result = await importCapsule({ capsule, workspace: ws, allowOverwrite: overwrite });
+    process.stdout.write(
+      `imported capsule into ${ws}\neffects ${result.counts.effects}  artifact records ${result.counts.artifactRecords}\nactivation pending: run 'relay doctor' in the target workspace before resuming\n`,
+    );
+    return 0;
+  } catch (err) {
+    process.stderr.write(`relay: import rejected: ${err instanceof Error ? err.message : String(err)}\n`);
+    return 2;
+  }
+}
+
 async function runLineageCommand(rest: string[], cwd: string): Promise<number> {
   const args = parseArtifactFlags(rest, cwd);
   if (args.positional.length !== 1) usageError("lineage requires exactly one <artifact-ref>");
@@ -200,6 +291,15 @@ export async function main(argv: string[], cwd: string = process.cwd()): Promise
   }
   if (command === "lineage") {
     return runLineageCommand(rest, cwd);
+  }
+  if (command === "effects") {
+    return runEffectsCommand(rest, cwd);
+  }
+  if (command === "export") {
+    return runExportCommand(rest, cwd);
+  }
+  if (command === "import") {
+    return runImportCommand(rest, cwd);
   }
   if (command !== "doctor") {
     usageError(`unknown command: ${command}`);

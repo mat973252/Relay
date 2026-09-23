@@ -88,6 +88,42 @@ export class SqliteEffectJournal implements EffectJournal {
     this.db.close();
   }
 
+  /** Capsule import path: atomically replaces the whole journal content. */
+  async replaceAll(records: EffectRecord[]): Promise<void> {
+    this.db.exec("BEGIN");
+    try {
+      this.db.exec("DELETE FROM relay_effects");
+      for (const record of records) {
+        this.db
+          .prepare(
+            `INSERT INTO relay_effects
+               (id, key, kind, request_hash, replay, status, remote_ref, result_json, reason,
+                created_at, submitted_at, settled_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            record.id,
+            record.key,
+            record.kind,
+            record.requestHash,
+            record.replay,
+            record.status,
+            record.remoteRef ?? null,
+            record.resultJson ?? null,
+            record.reason ?? null,
+            record.createdAt,
+            record.submittedAt ?? null,
+            record.settledAt ?? null,
+            record.updatedAt,
+          );
+      }
+      this.db.exec("COMMIT");
+    } catch (err) {
+      this.db.exec("ROLLBACK");
+      throw err;
+    }
+  }
+
   async insertPrepared(record: EffectRecord): Promise<void> {
     this.db
       .prepare(

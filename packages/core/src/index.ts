@@ -45,3 +45,10 @@ export {
   type CapabilitySpec,
   type CapabilityState,
 } from "./capabilities.js";
+export {
+  CAPSULE_ROOT,
+  validateManifest,
+  type CapsuleFileEntry,
+  type CapsuleManifest,
+  type MigrationEvidence,
+} from "./capsule.js";
