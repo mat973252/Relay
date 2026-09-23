@@ -1,0 +1,11 @@
+{
+  "name": "relay-workspace",
+  "private": true,
+  "version": "0.0.0",
+  "packageManager": "pnpm@10.33.0",
+  "scripts": {
+    "typecheck": "tsc -b",
+    "test": "node --test",
+    "check": "pnpm typecheck && pnpm test"
+  }
+}
