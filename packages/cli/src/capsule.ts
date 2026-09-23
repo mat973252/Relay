@@ -17,8 +17,7 @@
  * excluded by construction: only the allow-listed paths above are packed
  * and capsule code never reads the environment (T14).
  */
-import { copyFile, mkdir, mkdtemp, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, mkdtemp, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import {
   CAPSULE_ROOT,
@@ -73,10 +72,22 @@ export async function exportCapsule(options: ExportOptions): Promise<ExportResul
     journal.close();
   }
   const store = await ArtifactStore.open({ root: join(options.workspace, ".relay", "artifacts") });
+  // Capability contract auto-detection (round-trip coherence): an imported
+  // contract inside .relay wins over a workspace-root authoring copy.
+  const capabilitiesPath =
+    options.capabilitiesPath ??
+    (await stat(join(options.workspace, ".relay", "relay.capabilities.yaml")).then(
+      () => join(options.workspace, ".relay", "relay.capabilities.yaml"),
+      () =>
+        stat(join(options.workspace, "relay.capabilities.yaml")).then(
+          () => join(options.workspace, "relay.capabilities.yaml"),
+          () => undefined as string | undefined,
+        ),
+    ));
   const artifactRecords = await store.list();
-  const objectPaths = new Set<string>();
+  const objectDigests = new Set<string>();
   for (const record of artifactRecords) {
-    objectPaths.add(join(record.digest.slice(0, 2), record.digest));
+    objectDigests.add(record.digest);
   }
 
   const entries: TarEntry[] = [];
@@ -88,15 +99,14 @@ export async function exportCapsule(options: ExportOptions): Promise<ExportResul
 
   pushEntry(jsonEntry(`${CAPSULE_ROOT}/effects.json`, effects));
   pushEntry(jsonEntry(`${CAPSULE_ROOT}/artifacts/index.json`, artifactRecords));
-  for (const objectPath of [...objectPaths].sort()) {
-    const digest = objectPath.split("/")[1] ?? "";
+  for (const digest of [...objectDigests].sort()) {
     const data = await store.content({ digest } as ArtifactRecord);
-    pushEntry({ name: `${CAPSULE_ROOT}/artifacts/objects/${objectPath}`, data });
+    pushEntry({ name: `${CAPSULE_ROOT}/artifacts/objects/${digest.slice(0, 2)}/${digest}`, data });
   }
-  if (options.capabilitiesPath !== undefined) {
+  if (capabilitiesPath !== undefined) {
     pushEntry({
       name: `${CAPSULE_ROOT}/capabilities.yaml`,
-      data: Buffer.from(await readFile(options.capabilitiesPath, "utf8"), "utf8"),
+      data: Buffer.from(await readFile(capabilitiesPath, "utf8"), "utf8"),
     });
   }
   if (options.adapterContextPath !== undefined) {
@@ -118,7 +128,7 @@ export async function exportCapsule(options: ExportOptions): Promise<ExportResul
     counts: {
       effects: effects.length,
       artifactRecords: artifactRecords.length,
-      artifactObjects: objectPaths.size,
+      artifactObjects: objectDigests.size,
     },
     files: [], // filled after evidence hashing below
     integrity: { algorithm: "sha256" },
@@ -158,7 +168,8 @@ export async function exportCapsule(options: ExportOptions): Promise<ExportResul
   }
 
   const archive = gzip(createTar(finalEntries));
-  const tmpDir = await mkdtemp(join(tmpdir(), "relay-capsule-"));
+  await mkdir(dirname(options.output), { recursive: true });
+  const tmpDir = await mkdtemp(join(dirname(options.output), ".relay-capsule-"));
   try {
     const tmpPath = join(tmpDir, "capsule.tar.gz.tmp");
     const fh = await open(tmpPath, "w");
@@ -168,7 +179,6 @@ export async function exportCapsule(options: ExportOptions): Promise<ExportResul
     } finally {
       await fh.close();
     }
-    await mkdir(dirname(options.output), { recursive: true });
     await rename(tmpPath, options.output);
   } finally {
     await rm(tmpDir, { recursive: true, force: true });
@@ -186,6 +196,8 @@ export interface ImportResult {
   counts: CapsuleManifest["counts"];
   targetWorkspace: string;
   effectsPreserved: { key: string; status: string }[];
+  /** true when the capsule carried a capability contract (now at <workspace>/.relay/relay.capabilities.yaml). */
+  importedContract: boolean;
 }
 
 export interface ImportOptions {
@@ -200,7 +212,15 @@ export interface ImportOptions {
   crash?: { point: ImportCrashPoint; kill: (point: ImportCrashPoint) => void } | undefined;
 }
 
-export type ImportCrashPoint = "after-validation" | "after-stage" | "after-old-swap" | "after-commit";
+export type ImportCrashPoint =
+  | "after-validation"
+  | "after-stage"
+  | "after-old-swap"
+  | "after-relay-commit"
+  | "after-commit";
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const SHA256 = /^[0-9a-f]{64}$/;
 
 export async function importCapsule(options: ImportOptions): Promise<ImportResult> {
   const raw = await readFile(options.capsule);
@@ -211,6 +231,7 @@ export async function importCapsule(options: ImportOptions): Promise<ImportResul
     throw new Error(`capsule is not a valid gzip/ustar archive: ${err instanceof Error ? err.message : String(err)}`);
   }
   const byPath = new Map(entries.map((entry) => [entry.name, entry]));
+  if (byPath.size !== entries.length) throw new Error("duplicate capsule entry path");
 
   const manifestEntry = byPath.get(`${CAPSULE_ROOT}/manifest.json`);
   if (manifestEntry === undefined) throw new Error("capsule has no manifest.json");
@@ -239,6 +260,27 @@ export async function importCapsule(options: ImportOptions): Promise<ImportResul
     "artifacts/index.json",
   ) as ArtifactRecord[];
   if (!Array.isArray(artifactRecords)) throw new Error("capsule artifacts/index.json is not an array");
+  const recordIds = new Set<string>();
+  for (const record of artifactRecords) {
+    if (
+      typeof record !== "object" || record === null ||
+      typeof record.id !== "string" || !UUID.test(record.id) || recordIds.has(record.id) ||
+      typeof record.digest !== "string" || !SHA256.test(record.digest) ||
+      record.artifactId !== `artifact://sha256/${record.digest}` ||
+      !Number.isSafeInteger(record.byteSize) || record.byteSize < 0 ||
+      !Array.isArray(record.parents) || !record.parents.every((parent) => typeof parent === "string" && UUID.test(parent))
+    ) {
+      throw new Error("invalid artifact record in capsule");
+    }
+    recordIds.add(record.id);
+  }
+  if (
+    manifest.counts.effects !== effects.length ||
+    manifest.counts.artifactRecords !== artifactRecords.length ||
+    manifest.counts.artifactObjects !== new Set(artifactRecords.map((record) => record.digest)).size
+  ) {
+    throw new Error("capsule manifest counts do not match contents");
+  }
 
   // Guard against clobbering an active workspace (activation boundary).
   // Read-only existence check: opening the journal would create the file.
@@ -262,9 +304,35 @@ export async function importCapsule(options: ImportOptions): Promise<ImportResul
   }
   options.crash && options.crash.point === "after-validation" && options.crash.kill("after-validation");
 
-  // Stage a COMPLETE replacement .relay inside a temp dir; the commit is a
-  // directory swap so a crash never leaves a half-imported workspace.
-  const stage = await mkdtemp(join(tmpdir(), "relay-import-"));
+  // Recovery from a previous interrupted import, BEFORE any new staging:
+  //  - stale staging dirs are inert garbage; remove them;
+  //  - if a parked old state exists and no .relay does, the previous import
+  //    died between parking and installation: restore the old pair first so
+  //    this run (and `relay doctor`) always sees one coherent pair.
+  const parkedPath = join(options.workspace, ".relay.pre-import-old");
+  for (const entry of await readdir(options.workspace).catch(() => [] as string[])) {
+    if (entry.startsWith(".relay-import-")) {
+      await rm(join(options.workspace, entry), { recursive: true, force: true });
+    }
+  }
+  const relayMissing = await stat(relayDir).then(
+    () => false,
+    () => true,
+  );
+  if (relayMissing) {
+    const parkedExists = await stat(parkedPath).then(
+      () => true,
+      () => false,
+    );
+    if (parkedExists) await rename(parkedPath, relayDir);
+  }
+
+  // Stage a COMPLETE replacement .relay on the target filesystem; the commit
+  // is a single directory swap that carries the imported capability contract
+  // with it (relay.capabilities.yaml inside .relay), so Relay state and its
+  // capability requirements can never be observed in different generations.
+  await mkdir(options.workspace, { recursive: true });
+  const stage = await mkdtemp(join(options.workspace, ".relay-import-"));
   try {
     const stagedRelay = join(stage, "relay");
     const stagedArtifacts = join(stagedRelay, "artifacts");
@@ -309,7 +377,11 @@ export async function importCapsule(options: ImportOptions): Promise<ImportResul
     }
     const capabilitiesEntry = byPath.get(`${CAPSULE_ROOT}/capabilities.yaml`);
     if (capabilitiesEntry !== undefined) {
-      await writeFile(join(stage, "relay.capabilities.yaml"), capabilitiesEntry.data);
+      // Part of the imported state: staged INSIDE the replacement .relay so it
+      // crosses the commit boundary in the same rename. The workspace-root
+      // relay.capabilities.yaml (if any) is operator territory and is never
+      // touched by an import.
+      await writeFile(join(stagedRelay, "relay.capabilities.yaml"), capabilitiesEntry.data);
     }
     options.crash && options.crash.point === "after-stage" && options.crash.kill("after-stage");
 
@@ -328,11 +400,13 @@ export async function importCapsule(options: ImportOptions): Promise<ImportResul
     }
     options.crash && options.crash.point === "after-old-swap" && options.crash.kill("after-old-swap");
     await rename(stagedRelay, relayDir);
-    if (capabilitiesEntry !== undefined) {
-      await rename(join(stage, "relay.capabilities.yaml"), join(options.workspace, "relay.capabilities.yaml"));
-    }
+    // The single commit boundary has been crossed: Relay state and the
+    // imported capability contract became visible together. A death here
+    // (after-relay-commit) or after cleanup (after-commit) still leaves the
+    // new-new pair governing.
+    options.crash && options.crash.point === "after-relay-commit" && options.crash.kill("after-relay-commit");
     if (relayExists) {
-      await rm(join(options.workspace, ".relay.pre-import-old"), { recursive: true, force: true });
+      await rm(parkedPath, { recursive: true, force: true });
     }
     options.crash && options.crash.point === "after-commit" && options.crash.kill("after-commit");
     return {
@@ -340,6 +414,7 @@ export async function importCapsule(options: ImportOptions): Promise<ImportResul
       counts: manifest.counts,
       targetWorkspace: options.workspace,
       effectsPreserved: effects.map((e) => ({ key: e.key, status: e.status })),
+      importedContract: capabilitiesEntry !== undefined,
     };
   } finally {
     await rm(stage, { recursive: true, force: true });

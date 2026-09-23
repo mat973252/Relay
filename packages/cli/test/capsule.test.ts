@@ -5,14 +5,15 @@
  * preservation (T22), portable metadata (T23).
  */
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { after, describe, it } from "node:test";
 import { exportCapsule, importCapsule } from "../src/capsule.js";
-import { extractTar, gunzip } from "../src/tar.js";
+import { createTar, extractTar, gunzip, gzip, sha256Hex } from "../src/tar.js";
 import { SqliteEffectJournal } from "@relay/storage-sqlite";
 import { ArtifactStore } from "@relay/artifact-fs";
 import { CAPSULE_ROOT, validateManifest } from "@relay/core";
@@ -180,8 +181,9 @@ describe("capsule export/import (machine A -> machine B)", () => {
       recordsA.map((r) => r.digest).sort(),
     );
 
-    // Capabilities file and adapter context traveled along.
-    assert.ok(existsSync(join(machineB, "relay.capabilities.yaml")));
+    // Capabilities file and adapter context traveled along (the imported
+    // contract now lives INSIDE .relay — single commit boundary).
+    assert.ok(existsSync(join(machineB, ".relay", "relay.capabilities.yaml")));
     const packed = extractTar(gunzip(capsuleBytes));
     assert.ok(packed.some((entry) => entry.name === `${CAPSULE_ROOT}/adapter/context.json`));
 
@@ -192,8 +194,8 @@ describe("capsule export/import (machine A -> machine B)", () => {
     );
     await importCapsule({ capsule: capsulePath, workspace: machineB, allowOverwrite: true });
 
-    // T15 activation boundary: doctor evaluates the imported capability
-    // contract in the target workspace — blocked until the secret exists.
+    // T15 activation boundary: doctor resolves the contract committed with
+    // .relay by the import — no explicit --capabilities, no root file needed.
     const doctorBlocked = await spawnChild([
       CLI_JS,
       "doctor",
@@ -201,8 +203,6 @@ describe("capsule export/import (machine A -> machine B)", () => {
       join(machineB, ".relay", "storage.db"),
       "--artifacts",
       join(machineB, ".relay", "artifacts"),
-      "--capabilities",
-      join(machineB, "relay.capabilities.yaml"),
     ]);
     assert.equal(doctorBlocked.status, 2, doctorBlocked.stdout + doctorBlocked.stderr);
     assert.match(doctorBlocked.stdout, /activation: BLOCKED/);
@@ -260,8 +260,36 @@ describe("capsule export/import (machine A -> machine B)", () => {
     assert.equal(existsSync(join(target, ".relay")), false);
   });
 
+  it("rejects duplicate archive paths and unsafe artifact ids before staging", async () => {
+    const source = join(tmp, "machine-untrusted");
+    await seedWorkspace(source);
+    const capsule = join(tmp, "capsule-untrusted.tar.gz");
+    await exportCapsule({ workspace: source, output: capsule });
+    const entries = extractTar(gunzip(readFileSync(capsule)));
+    const target = join(tmp, "machine-untrusted-target");
+
+    const duplicate = join(tmp, "capsule-duplicate.tar.gz");
+    writeFileSync(duplicate, gzip(createTar([...entries, entries[0]!])));
+    await assert.rejects(() => importCapsule({ capsule: duplicate, workspace: target }), /duplicate capsule entry/);
+
+    const index = entries.find((entry) => entry.name === `${CAPSULE_ROOT}/artifacts/index.json`)!;
+    const records = JSON.parse(index.data.toString("utf8")) as { id: string }[];
+    records[0]!.id = "../../../../relay-escaped";
+    index.data = Buffer.from(JSON.stringify(records));
+    const manifestEntry = entries.find((entry) => entry.name === `${CAPSULE_ROOT}/manifest.json`)!;
+    const manifest = JSON.parse(manifestEntry.data.toString("utf8")) as { files: { path: string; sha256: string; byteSize: number }[] };
+    const indexFile = manifest.files.find((file) => file.path === index.name)!;
+    indexFile.sha256 = sha256Hex(index.data);
+    indexFile.byteSize = index.data.byteLength;
+    manifestEntry.data = Buffer.from(JSON.stringify(manifest));
+    const unsafe = join(tmp, "capsule-unsafe-id.tar.gz");
+    writeFileSync(unsafe, gzip(createTar(entries)));
+    await assert.rejects(() => importCapsule({ capsule: unsafe, workspace: target }), /invalid artifact record/);
+    assert.equal(existsSync(join(tmpdir(), "relay-escaped.json")), false);
+  });
+
   it("migrated SUBMITTED effect resumes in machine B without duplicate remote work", { timeout: 120_000 }, async () => {
-    const { startCounterProvider } = (await import(COUNTER_PROVIDER)) as {
+    const { startCounterProvider } = (await import(pathToFileURL(COUNTER_PROVIDER).href)) as {
       startCounterProvider: () => Promise<{
         baseUrl: string;
         state: () => { counter: number };
@@ -277,7 +305,10 @@ describe("capsule export/import (machine A -> machine B)", () => {
     try {
       // Machine A: crash after the remote commit — journal SUBMITTED, counter=1.
       const crashed = await spawnChild([EFFECT_CHILD, dbA, provider.baseUrl, "after-remote-commit", "counter/live:1"]);
-      assert.equal(crashed.signal, "SIGKILL", crashed.stderr);
+      assert.ok(
+        crashed.signal === "SIGKILL" || (process.platform === "win32" && crashed.status !== 0),
+        crashed.stderr,
+      );
 
       const capsulePath = join(tmp, "capsule-live.tar.gz");
       await exportCapsule({ workspace: machineA, output: capsulePath });
@@ -406,3 +437,231 @@ describe("M6 import crash matrix (all-or-nothing workspace swap)", () => {
 function renameSync(from: string, to: string): Promise<void> {
   return import("node:fs/promises").then((fs) => fs.rename(from, to));
 }
+
+describe("M7 import/capability coherence (single commit boundary)", () => {
+  const OLD_SECRET_ENV = "RELAY_OLD_CAP_SET";
+  const NEW_UNSET_ENV = "RELAY_NEW_CAP_UNSET";
+
+  /** Old contract: required secret that IS set -> doctor READY (exit 0) when it governs. */
+  function writeOldContract(dir: string): void {
+    writeFileSync(
+      join(dir, "relay.capabilities.yaml"),
+      [
+        "schema: relay.capabilities/1",
+        "capabilities:",
+        "  - id: old-provider-token",
+        "    required: true",
+        `    check: { kind: env-ref, env: ${OLD_SECRET_ENV} }`,
+      ].join("\n"),
+    );
+  }
+
+  function capsuleContract(): string {
+    // New contract: required secret that is NEVER set -> doctor BLOCKED (exit 2)
+    // when it governs. Different capability id than the old one.
+    return [
+      "schema: relay.capabilities/1",
+      "capabilities:",
+      "  - id: new-provider-token",
+      "    required: true",
+      `    check: { kind: env-ref, env: ${NEW_UNSET_ENV} }`,
+    ].join("\n");
+  }
+
+  async function seedTarget(dir: string): Promise<void> {
+    const journal = await SqliteEffectJournal.open({ path: join(dir, ".relay", "storage.db") });
+    try {
+      await journal.insertPrepared({
+        id: "old-1",
+        key: "old/op",
+        kind: "old",
+        requestHash: "00",
+        replay: "never",
+        status: "PREPARED",
+        remoteRef: undefined,
+        resultJson: undefined,
+        reason: undefined,
+        createdAt: 1,
+        submittedAt: undefined,
+        settledAt: undefined,
+        updatedAt: 1,
+      });
+      await journal.markSubmitted("old-1", 2);
+      await journal.markConfirmed("old-1", { remoteRef: "old-r", resultJson: "null", at: 3 });
+    } finally {
+      journal.close();
+    }
+    const store = await ArtifactStore.open({ root: join(dir, ".relay", "artifacts") });
+    await store.write({
+      content: "old-artifact",
+      mediaType: "text/plain",
+      producer: { type: "tool", id: "old" },
+    });
+    writeOldContract(dir);
+  }
+
+  async function buildCapsule(dir: string, withContract: boolean): Promise<string> {
+    const src = join(dir, "src");
+    const store = await ArtifactStore.open({ root: join(src, ".relay", "artifacts") });
+    await store.write({
+      content: "new-artifact",
+      mediaType: "text/plain",
+      producer: { type: "tool", id: "new" },
+    });
+    const journal = await SqliteEffectJournal.open({ path: join(src, ".relay", "storage.db") });
+    try {
+      await journal.insertPrepared({
+        id: "new-1",
+        key: "new/op",
+        kind: "new",
+        requestHash: "11",
+        replay: "never",
+        status: "PREPARED",
+        remoteRef: undefined,
+        resultJson: undefined,
+        reason: undefined,
+        createdAt: 1,
+        submittedAt: undefined,
+        settledAt: undefined,
+        updatedAt: 1,
+      });
+      await journal.markSubmitted("new-1", 2);
+      await journal.markConfirmed("new-1", { remoteRef: "new-r", resultJson: "null", at: 3 });
+    } finally {
+      journal.close();
+    }
+    let capabilitiesPath: string | undefined;
+    if (withContract) {
+      capabilitiesPath = join(src, "relay.capabilities.yaml");
+      writeFileSync(capabilitiesPath, capsuleContract());
+    }
+    const capsule = join(dir, "capsule.tar.gz");
+    await exportCapsule({ workspace: src, output: capsule, capabilitiesPath });
+    return capsule;
+  }
+
+  /** 0 = old/no contract governs (READY); 2 = imported new contract governs (BLOCKED). */
+  function doctorExit(target: string): number {
+    const result = spawnSync(
+      process.execPath,
+      [
+        CLI_JS,
+        "doctor",
+        "--storage",
+        join(target, ".relay", "storage.db"),
+        "--artifacts",
+        join(target, ".relay", "artifacts"),
+      ],
+      {
+        encoding: "utf8",
+        timeout: 120_000,
+        env: { ...process.env, [OLD_SECRET_ENV]: "old-contract-secret-set" },
+      },
+    );
+    return result.status ?? -1;
+  }
+
+  async function journalKeys(dir: string): Promise<string[]> {
+    const db = join(dir, ".relay", "storage.db");
+    if (!existsSync(db)) return [];
+    const journal = await SqliteEffectJournal.open({ path: db });
+    try {
+      return (await journal.list()).map((r) => r.key);
+    } finally {
+      journal.close();
+    }
+  }
+
+  async function assertOldPair(target: string): Promise<void> {
+    assert.deepEqual(await journalKeys(target), ["old/op"]);
+    assert.equal(existsSync(join(target, ".relay", "relay.capabilities.yaml")), false);
+    assert.match(readFileSync(join(target, "relay.capabilities.yaml"), "utf8"), /old-provider-token/);
+    assert.equal(doctorExit(target), 0, "old pair must remain doctor-READY");
+  }
+
+  async function assertNewPair(target: string): Promise<void> {
+    assert.deepEqual(await journalKeys(target), ["new/op"]);
+    const imported = join(target, ".relay", "relay.capabilities.yaml");
+    assert.ok(existsSync(imported), "imported contract must live inside .relay");
+    assert.match(readFileSync(imported, "utf8"), /new-provider-token/);
+    assert.equal(doctorExit(target), 2, "new pair must resolve the imported contract (BLOCKED, never READY)");
+  }
+
+  async function importWith(capsule: string, target: string, point: string): Promise<unknown> {
+    return importCapsule({
+      capsule,
+      workspace: target,
+      allowOverwrite: true,
+      crash: { point: point as never, kill: (p: string) => { throw new Error(`crash at ${p}`); } },
+    });
+  }
+
+  it("successful import pairs new state with the imported contract in one .relay commit", async () => {
+    const base = join(tmp, "m7-ok-");
+    const target = mkdtempSync(base);
+    await seedTarget(target);
+    const capsule = await buildCapsule(target, true);
+    await importCapsule({ capsule, workspace: target, allowOverwrite: true });
+    await assertNewPair(target);
+    assert.equal(existsSync(join(target, ".relay.pre-import-old")), false);
+  });
+
+  it("capsule without a contract imports state only; old root contract keeps governing", async () => {
+    const target = mkdtempSync(join(tmp, "m7-nocontract-"));
+    await seedTarget(target);
+    const capsule = await buildCapsule(target, false);
+    await importCapsule({ capsule, workspace: target, allowOverwrite: true });
+    assert.deepEqual(await journalKeys(target), ["new/op"]);
+    assert.equal(existsSync(join(target, ".relay", "relay.capabilities.yaml")), false);
+    assert.equal(doctorExit(target), 0, "no imported contract -> old root contract governs");
+  });
+
+  const interrupted = ["after-validation", "after-stage", "after-relay-commit", "after-commit"] as const;
+  for (const point of interrupted) {
+    it(`death at ${point}: the governing pair never mixes`, async () => {
+      const target = mkdtempSync(join(tmp, `m7-${point}-`));
+      await seedTarget(target);
+      const capsule = await buildCapsule(target, true);
+      await assert.rejects(() => importWith(capsule, target, point), /crash at/);
+      if (point === "after-validation" || point === "after-stage") {
+        await assertOldPair(target);
+      } else {
+        // after-relay-commit and after-commit both have the new .relay (with
+        // its contract) installed: the pair must be new-new, never new-old.
+        await assertNewPair(target);
+      }
+      // Recovery: a later import attempt completes to the new pair.
+      await importCapsule({ capsule, workspace: target, allowOverwrite: true });
+      await assertNewPair(target);
+    });
+  }
+
+  it("death after parking old state recovers the old pair, then a retry imports coherently", async () => {
+    const target = mkdtempSync(join(tmp, "m7-parked-"));
+    await seedTarget(target);
+    const capsule = await buildCapsule(target, true);
+    await assert.rejects(() => importWith(capsule, target, "after-old-swap"), /crash at/);
+    assert.equal(existsSync(join(target, ".relay")), false);
+    assert.ok(existsSync(join(target, ".relay.pre-import-old")));
+    // Documented recovery: the next import restores the parked state first.
+    await importCapsule({ capsule, workspace: target, allowOverwrite: true });
+    await assertNewPair(target);
+  });
+
+  it("unwritable workspace fails the import without touching the old pair", async () => {
+    const target = mkdtempSync(join(tmp, "m7-ro-"));
+    await seedTarget(target);
+    const capsule = await buildCapsule(target, true);
+    const { chmod } = await import("node:fs/promises");
+    await chmod(target, 0o555);
+    try {
+      await assert.rejects(
+        () => importCapsule({ capsule, workspace: target, allowOverwrite: true }),
+        (err: unknown) => err instanceof Error,
+      );
+    } finally {
+      await chmod(target, 0o755);
+    }
+    await assertOldPair(target);
+  });
+});

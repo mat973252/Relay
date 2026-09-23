@@ -136,34 +136,38 @@ export class SqliteEffectJournal implements EffectJournal {
   }
 
   async markSubmitted(id: string, at: number): Promise<void> {
-    this.db
-      .prepare("UPDATE relay_effects SET status = 'SUBMITTED', submitted_at = ?, updated_at = ? WHERE id = ?")
+    const result = this.db
+      .prepare("UPDATE relay_effects SET status = 'SUBMITTED', submitted_at = ?, updated_at = ? WHERE id = ? AND status = 'PREPARED'")
       .run(at, at, id);
+    if (result.changes !== 1) throw new Error(`invalid effect transition to SUBMITTED: ${id}`);
   }
 
   async markConfirmed(
     id: string,
     patch: { remoteRef: string | undefined; resultJson: string | undefined; at: number },
   ): Promise<void> {
-    this.db
+    const result = this.db
       .prepare(
         `UPDATE relay_effects
          SET status = 'CONFIRMED', remote_ref = ?, result_json = ?, settled_at = ?, updated_at = ?
-         WHERE id = ?`,
+         WHERE id = ? AND status IN ('SUBMITTED', 'UNKNOWN')`,
       )
       .run(patch.remoteRef ?? null, patch.resultJson ?? null, patch.at, patch.at, id);
+    if (result.changes !== 1) throw new Error(`invalid effect transition to CONFIRMED: ${id}`);
   }
 
   async markFailed(id: string, reason: string, at: number): Promise<void> {
-    this.db
-      .prepare("UPDATE relay_effects SET status = 'FAILED', reason = ?, settled_at = ?, updated_at = ? WHERE id = ?")
+    const result = this.db
+      .prepare("UPDATE relay_effects SET status = 'FAILED', reason = ?, settled_at = ?, updated_at = ? WHERE id = ? AND status IN ('SUBMITTED', 'UNKNOWN')")
       .run(reason, at, at, id);
+    if (result.changes !== 1) throw new Error(`invalid effect transition to FAILED: ${id}`);
   }
 
   async markUnknown(id: string, reason: string, at: number): Promise<void> {
-    this.db
-      .prepare("UPDATE relay_effects SET status = 'UNKNOWN', reason = ?, updated_at = ? WHERE id = ?")
+    const result = this.db
+      .prepare("UPDATE relay_effects SET status = 'UNKNOWN', reason = ?, updated_at = ? WHERE id = ? AND status IN ('SUBMITTED', 'UNKNOWN')")
       .run(reason, at, id);
+    if (result.changes !== 1) throw new Error(`invalid effect transition to UNKNOWN: ${id}`);
   }
 
   async get(id: string): Promise<EffectRecord | undefined> {

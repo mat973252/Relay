@@ -141,6 +141,7 @@ export class SqliteEpistemicStore implements EpistemicStore {
     const db = new sqlite.DatabaseSync(options.path);
     db.exec("PRAGMA journal_mode = WAL;");
     db.exec("PRAGMA synchronous = FULL;");
+    db.exec("PRAGMA foreign_keys = ON;");
     db.exec(SCHEMA);
     return new SqliteEpistemicStore(db);
   }

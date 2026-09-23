@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, describe, it } from "node:test";
 import { discoverDeferred } from "../src/index.js";
@@ -74,7 +74,7 @@ describe("M5 deferred migration through Pi public APIs", () => {
 
       // Capsule migration carries the Pi session file as adapter material.
       const sessionBytes = readFileSync(submittedInfo.sessionFile);
-      const sessionName = submittedInfo.sessionFile.split("/").pop() ?? "session.jsonl";
+      const sessionName = basename(submittedInfo.sessionFile);
       const capsulePath = join(tmp, "m5-capsule.tar.gz");
       await exportCapsule({
         workspace: machineA,
@@ -128,7 +128,7 @@ describe("M5 deferred migration through Pi public APIs", () => {
       const submitted = await runChild(["submit", machineA, sessionDirA, server.baseUrl]);
       assert.equal(submitted.status, 0, submitted.stderr);
       const info = JSON.parse(submitted.stdout.trim().split("\n").pop() ?? "{}") as { sessionFile: string };
-      const sessionName = info.sessionFile.split("/").pop() ?? "session.jsonl";
+      const sessionName = basename(info.sessionFile);
 
       const capsulePath = join(tmp, "m6-capsule.tar.gz");
       await exportCapsule({
@@ -145,14 +145,14 @@ describe("M5 deferred migration through Pi public APIs", () => {
       const before = await runChild(["resume", migratedSession, server.baseUrl], {
         RELAY_TEST_CRASH: "before-fetch",
       });
-      assert.equal(before.signal, "SIGKILL");
+      assert.ok(before.signal === "SIGKILL" || (process.platform === "win32" && before.status !== 0));
       assert.equal(server.submissions(), 1);
 
       // Death immediately after the first successful resume.
       const after = await runChild(["resume", migratedSession, server.baseUrl], {
         RELAY_TEST_CRASH: "after-fetch",
       });
-      assert.equal(after.signal, "SIGKILL");
+      assert.ok(after.signal === "SIGKILL" || (process.platform === "win32" && after.status !== 0));
       assert.equal(server.submissions(), 1, "resume duplicated the deferred submission");
 
       // A later process resumes cleanly and reads the completed job.

@@ -47,7 +47,7 @@ All injection points are exercised by real tests (in-process `SimulatedProcessDe
 | C08 | during artifact temp write | in-process seam | artifact-fs T09 (after-object-tmp, after-meta-tmp) | no visible record; retry succeeds |
 | C09 | before artifact atomic rename | in-process seam | artifact-fs T09 (after-object-rename) | object committed, record absent; invariant holds |
 | C10 | during capsule creation | in-process seam | cli T12 (25/50/75%) | no capsule file exists |
-| C11 | during capsule import (after validation / after staging / after old-state swap / after commit) | in-process seam | cli M6 matrix | old intact, or old parked in `.relay.pre-import-old` with no `.relay`, or fully imported — never mixed |
+| C11 | during capsule import (after validation / after staging / after parking old state / after the single `.relay` commit — which carries journal, artifacts, adapter material, and the imported capability contract together / after cleanup) | in-process seam | cli M6 matrix + M7 coherence matrix | old pair intact, or old state parked in `.relay.pre-import-old` with no `.relay` (next import auto-restores it), or the fully imported pair — Relay state and capability contract are never observed in different generations; `relay doctor` resolves the imported contract (`dirname(--storage)/relay.capabilities.yaml`) and never returns READY for a mixed pair |
 | C12 | immediately before Pi deferred resume | SIGKILL child | adapter-pi M5/M6 chaos | submissions stay 1; later process resumes |
 | C13 | immediately after Pi deferred resume | SIGKILL child | adapter-pi M6 chaos | submissions stay 1; later process resumes cleanly |
 

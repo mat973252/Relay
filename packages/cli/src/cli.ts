@@ -11,7 +11,7 @@
  * The CLI never reads or prints arbitrary environment values.
  */
 import { spawnSync } from "node:child_process";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   RELAY_VERSION,
@@ -42,8 +42,9 @@ usage:
 
 <artifact-ref> accepts a record id, a sha256 digest, or artifact://sha256/<digest>
 
-doctor also evaluates ./relay.capabilities.yaml when present (schema
-relay.capabilities/1; secret references are env var NAMES, never values)
+doctor also evaluates the capability contract: --capabilities PATH wins,
+else the contract imported with .relay (.relay/relay.capabilities.yaml),
+else ./relay.capabilities.yaml. Import never touches the root copy.
 
 doctor exit codes:
   0 ok/READY  |  1 degraded/DEGRADED  |  2 blocked/BLOCKED  |  64 usage error
@@ -248,7 +249,10 @@ async function runImportCommand(rest: string[], cwd: string): Promise<number> {
   try {
     const result = await importCapsule({ capsule, workspace: ws, allowOverwrite: overwrite });
     process.stdout.write(
-      `imported capsule into ${ws}\neffects ${result.counts.effects}  artifact records ${result.counts.artifactRecords}\nactivation pending: run 'relay doctor' in the target workspace before resuming\n`,
+      `imported capsule into ${ws}\n` +
+        `effects ${result.counts.effects}  artifact records ${result.counts.artifactRecords}` +
+        (result.importedContract ? `  contract .relay/relay.capabilities.yaml` : "") +
+        `\nactivation pending: run 'relay doctor' in the target workspace before resuming\n`,
     );
     return 0;
   } catch (err) {
@@ -317,11 +321,20 @@ export async function main(argv: string[], cwd: string = process.cwd()): Promise
     probes,
   });
 
-  // Capability contract (M3): evaluate relay.capabilities.yaml when present.
-  const capabilitiesPath = args.capabilities ?? join(cwd, "relay.capabilities.yaml");
-  const hasCapabilities = await import("node:fs")
-    .then((fs) => fs.existsSync(capabilitiesPath))
-    .catch(() => false);
+  // Capability contract (M3/M7) resolution order:
+  //   1. explicit --capabilities PATH (operator responsibility);
+  //   2. the contract imported with .relay (dirname(--storage)/relay.capabilities.yaml);
+  //   3. the workspace-root authoring copy (dirname of that .relay directory).
+  // Import and doctor therefore resolve the SAME contract that the import
+  // committed — a new .relay can never be activated against an old contract.
+  const fsModule = await import("node:fs");
+  const relayDir = dirname(args.storage);
+  const importedContract = join(relayDir, "relay.capabilities.yaml");
+  const rootContract = join(dirname(relayDir), "relay.capabilities.yaml");
+  const capabilitiesPath = args.capabilities ?? (fsModule.existsSync(importedContract)
+    ? importedContract
+    : rootContract);
+  const hasCapabilities = fsModule.existsSync(capabilitiesPath);
   let capabilityLines: string[] = [];
   let capabilitiesJson: unknown = undefined;
   let exitCode = doctorExitCode(result);

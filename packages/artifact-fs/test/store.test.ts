@@ -160,6 +160,14 @@ describe("lineage (T10)", () => {
     const integrity = await store.verify();
     assert.ok(integrity.problems.some((p) => p.includes("digest mismatch")));
   });
+
+  it("tampered artifact identity is detected by verify()", async () => {
+    const root = mkdtempSync(join(tmpRoot, "identity-"));
+    const store = await ArtifactStore.open({ root });
+    const record = await store.write({ content: "identity", mediaType: "text/plain", producer: { type: "t", id: "1" } });
+    writeFileSync(join(root, "records", `${record.id}.json`), JSON.stringify({ ...record, artifactId: "artifact://sha256/other" }));
+    assert.ok((await store.verify()).problems.some((problem) => problem.includes("artifact identity mismatch")));
+  });
 });
 
 describe("process restart survival (T11)", () => {

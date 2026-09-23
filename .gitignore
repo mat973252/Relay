@@ -10,3 +10,6 @@ dist/
 !.env.example
 .pi/npm/
 .pi/git/
+.relay-import-*/
+.relay-capsule-*/
+.relay.pre-import-old/

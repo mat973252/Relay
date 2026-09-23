@@ -139,6 +139,15 @@ describe("runEffect fresh path", () => {
     assert.equal(executionCount(), 1);
   });
 
+  it("rejects reuse of a semantic key for a different request or kind", async () => {
+    const journal = new MemoryJournal();
+    const { input, executionCount } = makeInput(journal);
+    await runEffect(input);
+    await assert.rejects(() => runEffect({ ...input, request: { amount: 2 } }), /semantic key.*different effect/);
+    await assert.rejects(() => runEffect({ ...input, kind: "other" }), /semantic key.*different effect/);
+    assert.equal(executionCount(), 1);
+  });
+
   it("definitive execute failure is FAILED (terminal on re-entry)", async () => {
     const journal = new MemoryJournal();
     const { input } = makeInput(journal);
@@ -180,7 +189,7 @@ describe("runEffect re-entry reconciliation", () => {
       id: "seed-1",
       key: "counter/increment:1",
       kind: "http-counter/increment",
-      requestHash: "seed",
+      requestHash: hashRequest({ amount: 1 }),
       replay: "never",
       status: "PREPARED",
       remoteRef: undefined,

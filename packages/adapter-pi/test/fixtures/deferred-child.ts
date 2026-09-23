@@ -17,6 +17,8 @@ import {
   SessionManager,
   createAgentSession,
 } from "@earendil-works/pi-coding-agent";
+import { readdir } from "node:fs/promises";
+import { join } from "node:path";
 import {
   createMockDeferredProvider,
   mockDeferredModel,
@@ -49,11 +51,10 @@ if (mode === "submit") {
   await session.prompt("Submit the long-running job and defer.");
   const sessionId = (sessionManager as unknown as { sessionId: string }).sessionId;
   const state = (sessionManager as unknown as { sessionFile?: string }).sessionFile;
-  const sessionFile =
-    state ??
-    (await import("node:fs/promises")).readdir(sessionDir).then(
-      (names) => `${sessionDir}/${names.find((n) => n.endsWith(".jsonl")) ?? ""}`,
-    );
+  const sessionFile = state ?? join(
+    sessionDir,
+    (await readdir(sessionDir)).find((name) => name.endsWith(".jsonl")) ?? fail("no session file found"),
+  );
   process.stdout.write(
     `${JSON.stringify({ ok: true, sessionId, sessionFile, model: model.id })}\n`,
   );
@@ -116,6 +117,8 @@ if (mode === "resume") {
   process.stdout.write(
     `${JSON.stringify({ ok: message.stopReason === "stop", stopReason: message.stopReason, text, entries: entries.length })}\n`,
   );
+  // Let Pi's native async handles finish closing before terminating on Windows.
+  await new Promise((resolve) => setTimeout(resolve, 200));
   process.exit(message.stopReason === "stop" ? 0 : 3);
 }
 

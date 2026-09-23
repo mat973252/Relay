@@ -212,6 +212,12 @@ export async function runEffect(input: RunEffectInput): Promise<EffectOutcome> {
   const journal = input.journal;
 
   const existing = await journal.getByKey(input.key);
+  if (
+    existing !== undefined &&
+    (existing.kind !== input.kind || existing.requestHash !== hashRequest(input.request) || existing.replay !== input.replay)
+  ) {
+    throw new Error(`semantic key ${input.key} refers to a different effect`);
+  }
 
   if (existing !== undefined && existing.status === "CONFIRMED") {
     return confirmedOutcome(existing, true, false);

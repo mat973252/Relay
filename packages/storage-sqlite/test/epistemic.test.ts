@@ -17,6 +17,18 @@ let clock = 1_000;
 const now = () => clock++;
 
 describe("SqliteEpistemicStore", () => {
+  it("rejects claims without an investigation", async () => {
+    const store = await SqliteEpistemicStore.open({ path: join(tmp, "foreign-keys.db") });
+    try {
+      await assert.rejects(
+        () => store.addClaim({ id: "orphan", investigationId: "missing", statement: "orphan", createdAt: now() }),
+        /FOREIGN KEY/,
+      );
+    } finally {
+      store.close();
+    }
+  });
+
   it("persists investigation/claim/evidence/belief/delta/decision across reopen", async () => {
     const dbPath = join(tmp, "epistemic.db");
     const store = await SqliteEpistemicStore.open({ path: dbPath });

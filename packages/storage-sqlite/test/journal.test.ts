@@ -85,10 +85,12 @@ describe("SqliteEffectJournal", () => {
       assert.equal(record.remoteRef, "fx-9");
       assert.equal(record.settledAt, 13);
 
-      await journal.markFailed("eff-2", "late failure", 14);
+      await assert.rejects(() => journal.markFailed("eff-2", "late failure", 14), /invalid effect transition/);
       record = await journal.get("eff-2");
       assert.ok(record !== undefined);
-      assert.equal(record.status, "FAILED");
+      assert.equal(record.status, "CONFIRMED");
+      await assert.rejects(() => journal.markSubmitted("eff-2", 15), /invalid effect transition/);
+      await assert.rejects(() => journal.markUnknown("missing", "unknown", 16), /invalid effect transition/);
     } finally {
       journal.close();
     }

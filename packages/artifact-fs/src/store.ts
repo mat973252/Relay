@@ -243,6 +243,9 @@ export class ArtifactStore {
     const records = await this.list();
     const problems: string[] = [];
     for (const record of records) {
+      if (record.artifactId !== `artifact://sha256/${record.digest}`) {
+        problems.push(`${record.id}: artifact identity mismatch`);
+      }
       let buffer: Buffer;
       try {
         buffer = await this.content(record);
