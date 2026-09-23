@@ -15,8 +15,8 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   RELAY_VERSION,
+  activationExitCode,
   doctorExitCode,
-  formatDoctorJson,
   formatDoctorReport,
   runDoctor,
   type DoctorProbeSpec,
@@ -24,25 +24,30 @@ import {
 } from "@relay/core";
 import { probeSqliteStorage } from "@relay/storage-sqlite";
 import { ArtifactStore, probeArtifactRoot, type ArtifactRecord, type LineageNode } from "@relay/artifact-fs";
+import { evaluateCapabilitiesFile } from "./capabilities.js";
 
 const USAGE = `relay — durable execution continuity for AI agents (M2)
 
 usage:
-  relay doctor [--json] [--storage PATH] [--artifacts PATH]
+  relay doctor [--json] [--storage PATH] [--artifacts PATH] [--capabilities PATH]
   relay artifacts [--json] [--artifacts PATH]
   relay lineage <artifact-ref> [--json] [--artifacts PATH]
   relay --help
 
 <artifact-ref> accepts a record id, a sha256 digest, or artifact://sha256/<digest>
 
+doctor also evaluates ./relay.capabilities.yaml when present (schema
+relay.capabilities/1; secret references are env var NAMES, never values)
+
 doctor exit codes:
-  0 ok  |  1 degraded (warn)  |  2 blocked (fail)  |  64 usage error
+  0 ok/READY  |  1 degraded/DEGRADED  |  2 blocked/BLOCKED  |  64 usage error
 `;
 
 interface DoctorArgs {
   json: boolean;
   storage: string;
   artifacts: string;
+  capabilities: string | undefined;
 }
 
 function usageError(message: string): never {
@@ -62,6 +67,7 @@ function parseDoctorArgs(argv: string[], cwd: string): DoctorArgs {
   let json = false;
   let storage: string | undefined;
   let artifacts: string | undefined;
+  let capabilities: string | undefined;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === undefined) break;
@@ -73,6 +79,9 @@ function parseDoctorArgs(argv: string[], cwd: string): DoctorArgs {
     } else if (arg === "--artifacts") {
       artifacts = requireValue(argv, i + 1, "--artifacts");
       i += 1;
+    } else if (arg === "--capabilities") {
+      capabilities = requireValue(argv, i + 1, "--capabilities");
+      i += 1;
     } else {
       usageError(`unknown argument for doctor: ${arg}`);
     }
@@ -81,6 +90,7 @@ function parseDoctorArgs(argv: string[], cwd: string): DoctorArgs {
     json,
     storage: storage ?? join(cwd, ".relay", "storage.db"),
     artifacts: artifacts ?? join(cwd, ".relay", "artifacts"),
+    capabilities,
   };
 }
 
@@ -206,8 +216,56 @@ export async function main(argv: string[], cwd: string = process.cwd()): Promise
     context: { cwd },
     probes,
   });
-  process.stdout.write(args.json ? formatDoctorJson(result) : `${formatDoctorReport(result)}\n`);
-  return doctorExitCode(result);
+
+  // Capability contract (M3): evaluate relay.capabilities.yaml when present.
+  const capabilitiesPath = args.capabilities ?? join(cwd, "relay.capabilities.yaml");
+  const hasCapabilities = await import("node:fs")
+    .then((fs) => fs.existsSync(capabilitiesPath))
+    .catch(() => false);
+  let capabilityLines: string[] = [];
+  let capabilitiesJson: unknown = undefined;
+  let exitCode = doctorExitCode(result);
+  if (hasCapabilities) {
+    try {
+      const { evaluation } = await evaluateCapabilitiesFile({ path: capabilitiesPath });
+      capabilityLines = [
+        `capabilities (${capabilitiesPath}):`,
+        ...evaluation.results.map(
+          (r) =>
+            `  [${r.state}${r.required ? "/required" : "/optional"}] ${r.label} (${r.id}): ${r.detail}`,
+        ),
+        `activation: ${evaluation.decision}`,
+      ];
+      capabilitiesJson = evaluation;
+      const capabilityCode = activationExitCode(evaluation);
+      exitCode = Math.max(exitCode, capabilityCode) as 0 | 1 | 2;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      capabilityLines = [`capabilities (${capabilitiesPath}): invalid — ${message}`];
+      capabilitiesJson = { error: message };
+      exitCode = 2;
+    }
+  }
+
+  if (args.json) {
+    const payload = {
+      ...result,
+      ...(capabilitiesJson === undefined ? {} : { capabilities: capabilitiesJson }),
+    };
+    process.stdout.write(`${JSON.stringify(payload)}\n`);
+  } else {
+    let text = formatDoctorReport(result);
+    // The formatted report ends with summary/exit-code lines; splice the
+    // capability section above them and re-derive the printed exit code.
+    const lines = text.split("\n");
+    const summaryIndex = lines.findIndex((line) => line.startsWith("summary:"));
+    const head = summaryIndex === -1 ? lines : lines.slice(0, summaryIndex);
+    const tail = summaryIndex === -1 ? [] : lines.slice(summaryIndex);
+    tail[1] = `exit code: ${exitCode}`;
+    text = [...head, ...capabilityLines, ...tail].join("\n");
+    process.stdout.write(`${text}\n`);
+  }
+  return exitCode;
 }
 
 const invokedDirectly =

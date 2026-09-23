@@ -12,7 +12,8 @@
   "dependencies": {
     "@relay/artifact-fs": "workspace:*",
     "@relay/core": "workspace:*",
-    "@relay/storage-sqlite": "workspace:*"
+    "@relay/storage-sqlite": "workspace:*",
+    "yaml": "^2.8.0"
   },
   "engines": {
     "node": ">=22"

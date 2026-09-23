@@ -113,10 +113,17 @@ describe("workspace boundary invariants", () => {
     assert.deepEqual(Object.keys(pkg.dependencies ?? {}), []);
   });
 
-  it("no package source reads process.env", () => {
+  it("no package source reads process.env (sanctioned reader: cli/src/env.ts only)", () => {
     for (const pkgName of packages) {
       for (const file of srcFiles(pkgName)) {
         const content = readFileSync(file, "utf8");
+        if (file.includes(join("cli", "src", "env.ts"))) {
+          assert.ok(
+            content.includes("process.env"),
+            "cli/src/env.ts is the sanctioned env reader; keep it reading env here",
+          );
+          continue;
+        }
         assert.ok(!content.includes("process.env"), `${file} must not read process.env`);
       }
     }

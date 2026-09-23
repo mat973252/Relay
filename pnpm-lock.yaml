@@ -48,6 +48,9 @@ importers:
       '@relay/storage-sqlite':
         specifier: workspace:*
         version: link:../storage-sqlite
+      yaml:
+        specifier: ^2.8.0
+        version: 2.9.0
 
   packages/core: {}
 

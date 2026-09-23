@@ -33,3 +33,15 @@ export {
   type RunEffectInput,
   type RunnerCrashPoint,
 } from "./effect.js";
+export {
+  activationExitCode,
+  evaluateCapabilities,
+  type ActivationDecision,
+  type CapabilityCheckSpec,
+  type CapabilityEvaluation,
+  type CapabilityProbe,
+  type CapabilityProbeOutcome,
+  type CapabilityResult,
+  type CapabilitySpec,
+  type CapabilityState,
+} from "./capabilities.js";
