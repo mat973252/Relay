@@ -25,9 +25,12 @@ const CHILD = fileURLToPath(new URL("./fixtures/deferred-child.js", import.meta.
 const tmp = mkdtempSync(join(tmpdir(), "relay-m5-"));
 after(() => rmSync(tmp, { recursive: true, force: true }));
 
-function runChild(args: string[]): Promise<{ status: number | null; stdout: string; stderr: string }> {
+function runChild(args: string[], env: Record<string, string> = {}): Promise<{ status: number | null; signal: string | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [CHILD, ...args], { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(process.execPath, [CHILD, ...args], {
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, ...env },
+    });
     let stdout = "";
     let stderr = "";
     const timer = setTimeout(() => child.kill("SIGKILL"), 90_000);
@@ -37,9 +40,9 @@ function runChild(args: string[]): Promise<{ status: number | null; stdout: stri
       clearTimeout(timer);
       reject(err);
     });
-    child.on("close", (status) => {
+    child.on("close", (status, signal) => {
       clearTimeout(timer);
-      resolve({ status, stdout, stderr });
+      resolve({ status, signal, stdout, stderr });
     });
   });
 }
@@ -111,6 +114,53 @@ describe("M5 deferred migration through Pi public APIs", () => {
       // Gate invariants: 1 submission, 2 processes, 1 migration, job completed.
       assert.equal(server.submissions(), 1, "deferred job was submitted more than once");
       assert.equal(server.completed(), true, "remote job did not complete after resume");
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("crashes immediately before/after Pi resume never duplicate the deferred job", { timeout: 180_000 }, async () => {
+    const server = await startJobServer(1_000);
+    const machineA = join(tmp, "chaos-a");
+    const machineB = join(tmp, "chaos-b");
+    const sessionDirA = join(machineA, "sessions");
+    try {
+      const submitted = await runChild(["submit", machineA, sessionDirA, server.baseUrl]);
+      assert.equal(submitted.status, 0, submitted.stderr);
+      const info = JSON.parse(submitted.stdout.trim().split("\n").pop() ?? "{}") as { sessionFile: string };
+      const sessionName = info.sessionFile.split("/").pop() ?? "session.jsonl";
+
+      const capsulePath = join(tmp, "m6-capsule.tar.gz");
+      await exportCapsule({
+        workspace: machineA,
+        output: capsulePath,
+        extraAdapterFiles: [
+          { path: `sessions/${sessionName}`, data: readFileSync(info.sessionFile) },
+        ],
+      });
+      await importCapsule({ capsule: capsulePath, workspace: machineB });
+      const migratedSession = join(machineB, ".relay", "adapter", "sessions", sessionName);
+
+      // Death immediately before resume.
+      const before = await runChild(["resume", migratedSession, server.baseUrl], {
+        RELAY_TEST_CRASH: "before-fetch",
+      });
+      assert.equal(before.signal, "SIGKILL");
+      assert.equal(server.submissions(), 1);
+
+      // Death immediately after the first successful resume.
+      const after = await runChild(["resume", migratedSession, server.baseUrl], {
+        RELAY_TEST_CRASH: "after-fetch",
+      });
+      assert.equal(after.signal, "SIGKILL");
+      assert.equal(server.submissions(), 1, "resume duplicated the deferred submission");
+
+      // A later process resumes cleanly and reads the completed job.
+      const final = await runChild(["resume", migratedSession, server.baseUrl]);
+      assert.equal(final.status, 0, final.stderr);
+      const finalInfo = JSON.parse(final.stdout.trim().split("\n").pop() ?? "{}") as { stopReason: string };
+      assert.equal(finalInfo.stopReason, "stop");
+      assert.equal(server.submissions(), 1, "final gate: submission count must remain 1");
     } finally {
       await server.stop();
     }

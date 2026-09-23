@@ -88,6 +88,11 @@ if (mode === "resume") {
   }
   if (handle === undefined) fail(`no deferred handle found in ${sessionFile}`);
 
+  // M6 chaos seam: death immediately before Pi resume.
+  if (process.env.RELAY_TEST_CRASH === "before-fetch") {
+    process.kill(process.pid, "SIGKILL");
+  }
+
   // Resume through Pi's public deferred API (poll until complete).
   let message: { stopReason?: string; content?: { type: string; text?: string }[] } = {};
   for (let attempt = 0; attempt < 40; attempt += 1) {
@@ -102,6 +107,10 @@ if (mode === "resume") {
       break;
     }
     await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  // M6 chaos seam: death immediately after the first successful resume.
+  if (process.env.RELAY_TEST_CRASH === "after-fetch") {
+    process.kill(process.pid, "SIGKILL");
   }
   const text = message.content?.map((part) => part.text ?? "").join("") ?? "";
   process.stdout.write(

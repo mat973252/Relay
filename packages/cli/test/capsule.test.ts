@@ -310,3 +310,99 @@ describe("capsule export/import (machine A -> machine B)", () => {
     }
   });
 });
+
+describe("M6 import crash matrix (all-or-nothing workspace swap)", () => {
+  async function seedOldState(dir: string): Promise<void> {
+    const journal = await SqliteEffectJournal.open({ path: join(dir, ".relay", "storage.db") });
+    try {
+      await journal.insertPrepared({
+        id: "old-1",
+        key: "old/op",
+        kind: "old",
+        requestHash: "00",
+        replay: "never",
+        status: "PREPARED",
+        remoteRef: undefined,
+        resultJson: undefined,
+        reason: undefined,
+        createdAt: 1,
+        submittedAt: undefined,
+        settledAt: undefined,
+        updatedAt: 1,
+      });
+      await journal.markSubmitted("old-1", 2);
+    } finally {
+      journal.close();
+    }
+    const store = await ArtifactStore.open({ root: join(dir, ".relay", "artifacts") });
+    await store.write({
+      content: "old-artifact",
+      mediaType: "text/plain",
+      producer: { type: "tool", id: "old" },
+    });
+  }
+
+  async function journalKeys(dir: string): Promise<string[]> {
+    const journal = await SqliteEffectJournal.open({ path: join(dir, ".relay", "storage.db") });
+    try {
+      return (await journal.list()).map((r) => r.key);
+    } finally {
+      journal.close();
+    }
+  }
+
+  const crashPoints = ["after-validation", "after-stage", "after-old-swap", "after-commit"] as const;
+
+  for (const point of crashPoints) {
+    it(`crash at ${point} leaves a consistent (old | parked-old | new) workspace`, async () => {
+      const machineA = join(tmp, `m6-src-${point}`);
+      await seedWorkspace(machineA);
+      const capsulePath = join(tmp, `m6-capsule-${point}.tar.gz`);
+      await exportCapsule({ workspace: machineA, output: capsulePath });
+
+      const target = join(tmp, `m6-target-${point}`);
+      await seedOldState(target);
+
+      const crash = {
+        point,
+        kill: (p: string) => {
+          throw new Error(`simulated crash at ${p}`);
+        },
+      };
+      if (point === "after-commit") {
+        await assert.rejects(
+          () => importCapsule({ capsule: capsulePath, workspace: target, allowOverwrite: true, crash }),
+          /simulated crash/,
+        );
+        // The caller died, but the workspace swap fully committed: the new
+        // artifact registry replaced the old one and no parked old dir stays.
+        const store = await ArtifactStore.open({ root: join(target, ".relay", "artifacts") });
+        const records = await store.list();
+        assert.equal(records.length, 3, "imported artifact records missing after commit crash");
+        assert.ok((await store.verify()).problems.length === 0);
+        assert.equal(existsSync(join(target, ".relay.pre-import-old")), false, "parked old state must be cleaned");
+      } else {
+        await assert.rejects(
+          () => importCapsule({ capsule: capsulePath, workspace: target, allowOverwrite: true, crash }),
+          /simulated crash/,
+        );
+        if (point === "after-old-swap") {
+          // Old state parked intact; recoverable by renaming back.
+          assert.equal(existsSync(join(target, ".relay")), false, "half-swapped .relay must not exist");
+          assert.ok(existsSync(join(target, ".relay.pre-import-old", "storage.db")));
+          await renameSync(join(target, ".relay.pre-import-old"), join(target, ".relay"));
+          assert.deepEqual(await journalKeys(target), ["old/op"]);
+        } else {
+          // Old state fully intact.
+          assert.deepEqual(await journalKeys(target), ["old/op"]);
+          const store = await ArtifactStore.open({ root: join(target, ".relay", "artifacts") });
+          assert.equal((await store.list()).length, 1);
+        }
+      }
+    });
+  }
+});
+
+function renameSync(from: string, to: string): Promise<void> {
+  return import("node:fs/promises").then((fs) => fs.rename(from, to));
+}

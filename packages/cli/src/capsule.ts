@@ -196,7 +196,11 @@ export interface ImportOptions {
   /** Reject instead of overwrite when target already has Relay state. */
   allowOverwrite?: boolean | undefined;
   now?: () => number;
+  /** M6 crash seam for the import commit sequence. */
+  crash?: { point: ImportCrashPoint; kill: (point: ImportCrashPoint) => void } | undefined;
 }
+
+export type ImportCrashPoint = "after-validation" | "after-stage" | "after-old-swap" | "after-commit";
 
 export async function importCapsule(options: ImportOptions): Promise<ImportResult> {
   const raw = await readFile(options.capsule);
@@ -237,23 +241,33 @@ export async function importCapsule(options: ImportOptions): Promise<ImportResul
   if (!Array.isArray(artifactRecords)) throw new Error("capsule artifacts/index.json is not an array");
 
   // Guard against clobbering an active workspace (activation boundary).
-  const journalPath = join(options.workspace, ".relay", "storage.db");
-  const existing = await SqliteEffectJournal.open({ path: journalPath });
-  let existingCount = 0;
-  try {
-    existingCount = (await existing.list()).length;
-  } finally {
-    existing.close();
+  // Read-only existence check: opening the journal would create the file.
+  const relayDir = join(options.workspace, ".relay");
+  const journalPath = join(relayDir, "storage.db");
+  const journalExists = await stat(journalPath).then(
+    () => true,
+    () => false,
+  );
+  if (journalExists) {
+    const existing = await SqliteEffectJournal.open({ path: journalPath });
+    let existingCount = 0;
+    try {
+      existingCount = (await existing.list()).length;
+    } finally {
+      existing.close();
+    }
+    if (existingCount > 0 && options.allowOverwrite !== true) {
+      throw new Error(`target workspace already holds ${existingCount} effect records; pass --overwrite to replace`);
+    }
   }
-  if (existingCount > 0 && options.allowOverwrite !== true) {
-    throw new Error(`target workspace already holds ${existingCount} effect records; pass --overwrite to replace`);
-  }
+  options.crash && options.crash.point === "after-validation" && options.crash.kill("after-validation");
 
-  // Stage everything into a temp dir, then commit by rename/copy.
+  // Stage a COMPLETE replacement .relay inside a temp dir; the commit is a
+  // directory swap so a crash never leaves a half-imported workspace.
   const stage = await mkdtemp(join(tmpdir(), "relay-import-"));
   try {
-    // Objects + records land in a staged artifact root.
-    const stagedArtifacts = join(stage, "artifacts");
+    const stagedRelay = join(stage, "relay");
+    const stagedArtifacts = join(stagedRelay, "artifacts");
     await mkdir(join(stagedArtifacts, "objects"), { recursive: true });
     await mkdir(join(stagedArtifacts, "records"), { recursive: true });
     for (const record of artifactRecords) {
@@ -274,47 +288,53 @@ export async function importCapsule(options: ImportOptions): Promise<ImportResul
     }
 
     // Journal import: statuses preserved verbatim (UNKNOWN never auto-converts).
-    const journal = await SqliteEffectJournal.open({ path: join(stage, "storage.db") });
+    const journal = await SqliteEffectJournal.open({ path: join(stagedRelay, "storage.db") });
     try {
       await journal.replaceAll(effects);
     } finally {
       journal.close();
     }
-
-    const capabilitiesEntry = byPath.get(`${CAPSULE_ROOT}/capabilities.yaml`);
-    if (capabilitiesEntry !== undefined) {
-      await writeFile(join(stage, "relay.capabilities.yaml"), capabilitiesEntry.data);
+    for (const name of ["storage.db-wal", "storage.db-shm"]) {
+      await rm(join(stagedRelay, name), { force: true });
     }
 
     // Adapter material (e.g. migrated Pi session files) lands under .relay/adapter/.
     for (const entry of entries) {
       if (entry.name.startsWith(`${CAPSULE_ROOT}/adapter/`)) {
         const relative = entry.name.slice(`${CAPSULE_ROOT}/adapter/`.length);
-        const target = join(stage, "adapter", relative);
+        const target = join(stagedRelay, "adapter", relative);
         await mkdir(dirname(target), { recursive: true });
         await writeFile(target, entry.data);
       }
     }
-
-    // Commit: copy staged state into the target workspace.
-    const relayDir = join(options.workspace, ".relay");
-    await mkdir(relayDir, { recursive: true });
-    await copyFile(join(stage, "storage.db"), journalPath);
-    for (const name of ["storage.db-wal", "storage.db-shm"]) {
-      await rm(join(stage, name), { force: true });
+    const capabilitiesEntry = byPath.get(`${CAPSULE_ROOT}/capabilities.yaml`);
+    if (capabilitiesEntry !== undefined) {
+      await writeFile(join(stage, "relay.capabilities.yaml"), capabilitiesEntry.data);
     }
-    const targetArtifacts = join(relayDir, "artifacts");
-    await rm(targetArtifacts, { recursive: true, force: true });
-    await mkdir(dirname(targetArtifacts), { recursive: true });
-    await rename(stagedArtifacts, targetArtifacts);
+    options.crash && options.crash.point === "after-stage" && options.crash.kill("after-stage");
+
+    // Commit: all-or-nothing directory swap. Crash windows leave either the
+    // old state intact, the old state parked in .relay.pre-import-old (with
+    // no .relay), or the fully imported state — never a mixture.
+    await mkdir(options.workspace, { recursive: true });
+    const relayExists = await stat(relayDir).then(
+      () => true,
+      () => false,
+    );
+    if (relayExists) {
+      const parked = join(options.workspace, ".relay.pre-import-old");
+      await rm(parked, { recursive: true, force: true });
+      await rename(relayDir, parked);
+    }
+    options.crash && options.crash.point === "after-old-swap" && options.crash.kill("after-old-swap");
+    await rename(stagedRelay, relayDir);
     if (capabilitiesEntry !== undefined) {
       await rename(join(stage, "relay.capabilities.yaml"), join(options.workspace, "relay.capabilities.yaml"));
     }
-    const targetAdapter = join(relayDir, "adapter");
-    if (await stat(join(stage, "adapter")).then(() => true, () => false)) {
-      await rm(targetAdapter, { recursive: true, force: true });
-      await rename(join(stage, "adapter"), targetAdapter);
+    if (relayExists) {
+      await rm(join(options.workspace, ".relay.pre-import-old"), { recursive: true, force: true });
     }
+    options.crash && options.crash.point === "after-commit" && options.crash.kill("after-commit");
     return {
       manifest,
       counts: manifest.counts,
