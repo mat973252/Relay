@@ -17,6 +17,9 @@ importers:
 
   packages/adapter-pi:
     dependencies:
+      '@earendil-works/pi-ai':
+        specifier: ^0.87.1
+        version: 0.87.1(ws@8.21.3)
       '@relay/artifact-fs':
         specifier: workspace:*
         version: link:../artifact-fs
@@ -30,6 +33,9 @@ importers:
       '@earendil-works/pi-coding-agent':
         specifier: 0.87.0
         version: 0.87.0(ws@8.21.3)
+      '@relay/cli':
+        specifier: workspace:*
+        version: link:../cli
 
   packages/artifact-fs:
     dependencies:

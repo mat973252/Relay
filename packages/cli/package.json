@@ -6,6 +6,16 @@
   "bin": {
     "relay": "./dist/src/cli.js"
   },
+  "exports": {
+    ".": {
+      "types": "./dist/src/cli.d.ts",
+      "import": "./dist/src/cli.js"
+    },
+    "./capsule": {
+      "types": "./dist/src/capsule.d.ts",
+      "import": "./dist/src/capsule.js"
+    }
+  },
   "scripts": {
     "test": "tsc -b . && node --test \"dist/**/*.test.js\""
   },

@@ -17,7 +17,7 @@
  * excluded by construction: only the allow-listed paths above are packed
  * and capsule code never reads the environment (T14).
  */
-import { copyFile, mkdir, mkdtemp, open, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -42,6 +42,8 @@ export interface ExportOptions {
   capabilitiesPath?: string | undefined;
   /** Optional opaque adapter material (JSON file). */
   adapterContextPath?: string | undefined;
+  /** Optional extra adapter files packed under relay-capsule/adapter/ (path relative to that root, POSIX). */
+  extraAdapterFiles?: { path: string; data: Buffer }[] | undefined;
   /** Injectable clock for determinism. */
   now?: () => number;
   /** Test crash seam: called after packing each entry; throw to simulate death. */
@@ -102,6 +104,10 @@ export async function exportCapsule(options: ExportOptions): Promise<ExportResul
       name: `${CAPSULE_ROOT}/adapter/context.json`,
       data: Buffer.from(await readFile(options.adapterContextPath, "utf8"), "utf8"),
     });
+  }
+  for (const extra of options.extraAdapterFiles ?? []) {
+    validateEntryPath(extra.path);
+    pushEntry({ name: `${CAPSULE_ROOT}/adapter/${extra.path}`, data: extra.data });
   }
 
   const manifest: CapsuleManifest = {
@@ -280,6 +286,16 @@ export async function importCapsule(options: ImportOptions): Promise<ImportResul
       await writeFile(join(stage, "relay.capabilities.yaml"), capabilitiesEntry.data);
     }
 
+    // Adapter material (e.g. migrated Pi session files) lands under .relay/adapter/.
+    for (const entry of entries) {
+      if (entry.name.startsWith(`${CAPSULE_ROOT}/adapter/`)) {
+        const relative = entry.name.slice(`${CAPSULE_ROOT}/adapter/`.length);
+        const target = join(stage, "adapter", relative);
+        await mkdir(dirname(target), { recursive: true });
+        await writeFile(target, entry.data);
+      }
+    }
+
     // Commit: copy staged state into the target workspace.
     const relayDir = join(options.workspace, ".relay");
     await mkdir(relayDir, { recursive: true });
@@ -293,6 +309,11 @@ export async function importCapsule(options: ImportOptions): Promise<ImportResul
     await rename(stagedArtifacts, targetArtifacts);
     if (capabilitiesEntry !== undefined) {
       await rename(join(stage, "relay.capabilities.yaml"), join(options.workspace, "relay.capabilities.yaml"));
+    }
+    const targetAdapter = join(relayDir, "adapter");
+    if (await stat(join(stage, "adapter")).then(() => true, () => false)) {
+      await rm(targetAdapter, { recursive: true, force: true });
+      await rename(join(stage, "adapter"), targetAdapter);
     }
     return {
       manifest,
@@ -311,5 +332,11 @@ function safeJsonParse(data: Buffer | undefined, what: string): unknown {
     return JSON.parse(data.toString("utf8"));
   } catch (err) {
     throw new Error(`capsule ${what} is not valid JSON: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+function validateEntryPath(path: string): void {
+  if (path.length === 0 || path.startsWith("/") || path.includes("..") || path.includes("\\")) {
+    throw new Error(`invalid capsule adapter entry path: ${path}`);
   }
 }

@@ -94,3 +94,13 @@ export function createRelayExtension(options: RelayExtensionOptions = {}) {
 }
 
 export default createRelayExtension();
+export {
+  createMockDeferredProvider,
+  discoverDeferred,
+  mockDeferredModel,
+  MOCK_API,
+  MOCK_MODEL_ID,
+  MOCK_PROVIDER_ID,
+  type DiscoveredDeferred,
+  type MockDeferredProviderOptions,
+} from "./deferred.js";

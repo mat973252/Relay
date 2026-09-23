@@ -12,7 +12,9 @@
     }
   },
   "pi": {
-    "extensions": ["./dist/src/index.js"]
+    "extensions": [
+      "./dist/src/index.js"
+    ]
   },
   "scripts": {
     "test": "tsc -b . && node --test \"dist/**/*.test.js\""
@@ -20,13 +22,15 @@
   "dependencies": {
     "@relay/artifact-fs": "workspace:*",
     "@relay/core": "workspace:*",
-    "@relay/storage-sqlite": "workspace:*"
+    "@relay/storage-sqlite": "workspace:*",
+    "@earendil-works/pi-ai": "^0.87.1"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "0.87.0"
+    "@earendil-works/pi-coding-agent": "0.87.0",
+    "@relay/cli": "workspace:*"
   },
   "engines": {
     "node": ">=22"
