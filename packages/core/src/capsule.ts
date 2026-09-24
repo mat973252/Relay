@@ -4,8 +4,8 @@
  * A capsule is an export FORMAT, not a runtime: it carries Relay-owned
  * durable facts (effect journal, artifact records + content), the
  * capability requirements, optional opaque adapter material, and migration
- * evidence — never resolved secret values. All paths inside a capsule are
- * relative POSIX paths; machine-specific absolute paths are forbidden
+ * evidence. Callers must keep secret values out of those inputs. All paths
+ * inside a capsule are relative POSIX paths; machine-specific absolute paths are forbidden
  * (T23).
  */
 

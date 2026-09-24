@@ -606,6 +606,17 @@ describe("M7 import/capability coherence (single commit boundary)", () => {
     assert.equal(existsSync(join(target, ".relay.pre-import-old")), false);
   });
 
+  it("requires --overwrite when the target has artifacts or a contract but no effects", async () => {
+    const target = mkdtempSync(join(tmp, "m7-artifacts-only-"));
+    const store = await ArtifactStore.open({ root: join(target, ".relay", "artifacts") });
+    await store.write({ content: "keep-me", mediaType: "text/plain", producer: { type: "tool", id: "old" } });
+    writeFileSync(join(target, ".relay", "relay.capabilities.yaml"), capsuleContract());
+    const capsule = await buildCapsule(target, true);
+    await assert.rejects(() => importCapsule({ capsule, workspace: target }), /already holds Relay state/);
+    assert.equal((await store.list()).length, 1);
+    assert.ok(existsSync(join(target, ".relay", "relay.capabilities.yaml")));
+  });
+
   it("capsule without a contract imports state only; old root contract keeps governing", async () => {
     const target = mkdtempSync(join(tmp, "m7-nocontract-"));
     await seedTarget(target);
@@ -648,7 +659,21 @@ describe("M7 import/capability coherence (single commit boundary)", () => {
     await assertNewPair(target);
   });
 
-  it("unwritable workspace fails the import without touching the old pair", async () => {
+  it("restores parked state before enforcing --overwrite on retry", async () => {
+    const target = mkdtempSync(join(tmp, "m7-parked-guard-"));
+    await seedTarget(target);
+    const capsule = await buildCapsule(target, true);
+    await assert.rejects(() => importWith(capsule, target, "after-old-swap"), /crash at/);
+    await assert.rejects(() => importCapsule({ capsule, workspace: target }), /already holds Relay state/);
+    await assertOldPair(target);
+    assert.equal(existsSync(join(target, ".relay.pre-import-old")), false);
+  });
+
+  it("unwritable workspace fails the import without touching the old pair", async (t) => {
+    if (process.platform === "win32" || process.getuid?.() === 0) {
+      t.skip("chmod does not reliably deny writes for this process");
+      return;
+    }
     const target = mkdtempSync(join(tmp, "m7-ro-"));
     await seedTarget(target);
     const capsule = await buildCapsule(target, true);

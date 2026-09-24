@@ -13,9 +13,10 @@
  * Export is atomic: the archive is assembled in a temp file and renamed
  * into place only when complete, so an interrupted export never leaves an
  * apparently-valid capsule (T12). Import re-hashes every file against the
- * manifest before anything touches the target workspace (T13). Secrets are
- * excluded by construction: only the allow-listed paths above are packed
- * and capsule code never reads the environment (T14).
+ * manifest before anything touches the target workspace (T13). The exporter
+ * never reads the environment. Artifact content
+ * and explicitly supplied adapter files are opaque caller-owned data and
+ * must be reviewed for secrets before export.
  */
 import { mkdir, mkdtemp, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -282,26 +283,7 @@ export async function importCapsule(options: ImportOptions): Promise<ImportResul
     throw new Error("capsule manifest counts do not match contents");
   }
 
-  // Guard against clobbering an active workspace (activation boundary).
-  // Read-only existence check: opening the journal would create the file.
   const relayDir = join(options.workspace, ".relay");
-  const journalPath = join(relayDir, "storage.db");
-  const journalExists = await stat(journalPath).then(
-    () => true,
-    () => false,
-  );
-  if (journalExists) {
-    const existing = await SqliteEffectJournal.open({ path: journalPath });
-    let existingCount = 0;
-    try {
-      existingCount = (await existing.list()).length;
-    } finally {
-      existing.close();
-    }
-    if (existingCount > 0 && options.allowOverwrite !== true) {
-      throw new Error(`target workspace already holds ${existingCount} effect records; pass --overwrite to replace`);
-    }
-  }
   options.crash && options.crash.point === "after-validation" && options.crash.kill("after-validation");
 
   // Recovery from a previous interrupted import, BEFORE any new staging:
@@ -325,6 +307,16 @@ export async function importCapsule(options: ImportOptions): Promise<ImportResul
       () => false,
     );
     if (parkedExists) await rename(parkedPath, relayDir);
+  }
+
+  // Any existing Relay state may contain artifacts or a capability contract
+  // even when the effect journal is empty or absent.
+  const targetHasRelayState = await stat(relayDir).then(
+    () => true,
+    () => false,
+  );
+  if (targetHasRelayState && options.allowOverwrite !== true) {
+    throw new Error("target workspace already holds Relay state; pass --overwrite to replace");
   }
 
   // Stage a COMPLETE replacement .relay on the target filesystem; the commit
