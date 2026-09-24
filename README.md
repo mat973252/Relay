@@ -54,3 +54,35 @@ powershell -ExecutionPolicy Bypass -File scripts/start-relay-m0.ps1
 ```
 
 See `AGENTS.md` and `tasks/` before implementation.
+
+## The one-sitting proof (no Pi, no model account, no Docker)
+
+```bash
+corepack pnpm install && corepack pnpm typecheck   # build once
+node examples/crash-demo.mjs
+```
+
+Expected tail of the output: a child process is SIGKILLed **after** the local
+HTTP counter has committed but before any local confirmation; on restart the
+same operation id replays, Relay asks a read-only reconciliation question,
+and the assertions print `PASS` four times with the remote counter at exactly
+1. Real guarantee: **no silent retry of an ambiguous unsafe action** —
+stronger guarantees need downstream idempotency or a reliable reconciliation
+query.
+
+## MCP entry points (Claude Code, Codex, Pi)
+
+`packages/mcp` exposes the same effect engine as a local stdio MCP server:
+
+- only explicitly configured actions run (`<workspace>/.relay/mcp-actions.json`,
+  schema `relay.mcp-actions/1`) — destinations and credentials never come from
+  model text;
+- one live server per workspace (single-writer lock; a second one fails
+  closed until the first exits; the lock is recoverable after process death);
+- unresolved operations are listable so fresh sessions reuse operation ids.
+
+Host entries: `hosts/claude-code/relay-effect-guard` and
+`hosts/codex/relay-effect-guard` (verified by real tool calls from both hosts
+on one shared workspace). Protection applies **only** to actions executed
+through the relay tools; raw shell/HTTP, built-in tools, and other MCP
+servers are outside the guarantee.

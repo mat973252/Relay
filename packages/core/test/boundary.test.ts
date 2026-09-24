@@ -113,14 +113,16 @@ describe("workspace boundary invariants", () => {
     assert.deepEqual(Object.keys(pkg.dependencies ?? {}), []);
   });
 
-  it("no package source reads process.env (sanctioned reader: cli/src/env.ts only)", () => {
+  it("no package source reads process.env (sanctioned readers: cli/src/env.ts and mcp/src/env.ts only)", () => {
+    const sanctioned = [join("cli", "src", "env.ts"), join("mcp", "src", "env.ts")];
     for (const pkgName of packages) {
       for (const file of srcFiles(pkgName)) {
         const content = readFileSync(file, "utf8");
-        if (file.includes(join("cli", "src", "env.ts"))) {
+        const relative = file.slice(packagesDir.length).split("\\").join("/");
+        if (sanctioned.some((s) => relative === s)) {
           assert.ok(
             content.includes("process.env"),
-            "cli/src/env.ts is the sanctioned env reader; keep it reading env here",
+            `${relative} is a sanctioned env reader; keep it reading env here`,
           );
           continue;
         }

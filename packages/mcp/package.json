@@ -1,0 +1,27 @@
+{
+  "name": "@relay/mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
+    }
+  },
+  "bin": {
+    "relay-mcp": "./dist/src/main.js"
+  },
+  "scripts": {
+    "test": "tsc -b . && node --test \"dist/**/*.test.js\""
+  },
+  "dependencies": {
+    "@relay/core": "workspace:*",
+    "@relay/storage-sqlite": "workspace:*"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
