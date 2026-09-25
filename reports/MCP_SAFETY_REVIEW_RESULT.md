@@ -30,17 +30,24 @@ recorded output; the Codex auth copy lived only in a disposable temp
    unchanged. The reconcile pre-check runs inside the same per-key chain, so
    it also cannot race an in-flight submission.
 3. **Single owner remains true after takeover** (`packages/mcp/src/lock.ts`,
-   full redesign): takeover of a stale lock is an ATOMIC CLAIM — exactly one
-   successor's `rename(lock → unique tombstone)` succeeds; losers get ENOENT,
-   re-read the winner's live lock, and stay closed. The claimed tombstone is
-   verified against the stale body observed before the rename, so a live
-   owner's replacement lock cannot be stolen silently; on mismatch it is
-   restored and the claimant stays closed. `settleMs` is gone — the claim is
-   the fence, not a delay. `startedAt` is now CHECKED: a lock naming our pid
-   that this process did not write is attributed by it — written before this
-   module booted ⇒ provably dead predecessor (pid reuse) ⇒ takeover;
-   otherwise ⇒ fail closed. Malformed lock data fails CLOSED (no takeover of
-   an unreadable lock; operator removes it). `releaseWorkspaceOwnership`
+   redesigned twice — see "Review round 2" for the gap fix): the final
+   protocol claims a succession and installs the new lock as ONE atomic
+   replacement. Takeover of an observed stale body B: (1) hard-link
+   SNAPSHOT of the current lock — if it is not exactly B, yield WITHOUT
+   touching the lock (stealing a live owner's replacement lock is
+   impossible; there is no "restore" path at all); (2) exclusive FENCE
+   `link(claimant → mcp-owner.claim.<hash(B)>)` — gap-free, exactly one
+   successor per succession; a fence whose claimant is provably dead (dead
+   pid, or same-pid predecessor via startedAt) is recovered by a
+   single-winner rename, foreign/unattributable claimants fail closed;
+   (3) re-snapshot must still show B; (4) INSTALL via `rename(next → lock)`
+   — the lock path is NEVER absent, so no third process can slip into a
+   gap; (5) read-back verify. `settleMs` is gone entirely. `startedAt` is
+   CHECKED: a lock naming our pid that this process did not write is
+   attributed by it — written before this module booted ⇒ provably dead
+   predecessor (pid reuse) ⇒ takeover; otherwise ⇒ fail closed. Malformed
+   lock data fails CLOSED (no takeover of an unreadable lock; operator
+   removes it). `releaseWorkspaceOwnership`
    deletes the lock only when the on-disk body is EXACTLY the body this
    process wrote and verified (pid + hostname + startedAt), so an old owner
    can never remove a successor's lock — including under pid reuse.
@@ -88,8 +95,8 @@ recorded output; the Codex auth copy lived only in a disposable temp
 ## 2. Reproducible local evidence
 
 `corepack pnpm check` — typecheck + full suite:
-**142 tests, 142 pass, 0 fail, 0 skipped** (epistemic 8, core 40,
-artifact-fs 12, storage-sqlite 17, cli 33, **mcp 25**, adapter-pi 7).
+**143 tests, 143 pass, 0 fail, 0 skipped** (epistemic 8, core 40,
+artifact-fs 12, storage-sqlite 17, cli 33, **mcp 26**, adapter-pi 7).
 
 Regression-first: every new safety test was run against the pre-fix code and
 failed there before the fix landed —
@@ -101,17 +108,51 @@ PREPARED-key reconcile mutating to FAILED, commit-then-409 and commit-then-408
 settled FAILED, never-responding request hanging past any bound,
 list without actionId/operationId/intent, config change silently reusing an
 operation id, endpoints without `{operationId}` accepted;
-`packages/mcp/test/lock.test.ts` (9 tests, was 3): malformed lock taken over
+`packages/mcp/test/lock.test.ts` (10 tests, was 3): malformed lock taken over
 (fail-open), release deleting a successor's same-pid lock (startedAt
-unchecked), pid-reuse predecessor lock stuck closed, plus the invariant
+unchecked), pid-reuse predecessor lock stuck closed, the claim/install gap
+(see "Review round 2"), plus the invariant
 suite — two independent successor PROCESSES racing one stale lock over three
 rounds yield exactly one owner whose pid the lock names, and a live owner is
-respected during a concurrent takeover attempt (re-run 3×: stable 9/9).
+respected during a concurrent takeover attempt (re-run 4×: stable).
 The only new test that also passed pre-fix is the configured-rejection
 FAILED case (an invariant both designs share).
 
 Crash demo: `node examples/crash-demo.mjs` — 4/4 PASS, remote counter 1
 (SIGKILL after remote commit; restart; read-only reconcile confirms).
+
+## 2a. Review round 2 — the claim/install gap
+
+The first redesign still had a two-step takeover: rename the stale lock to a
+tombstone (claim), then `rm` the tombstone and `O_EXCL`-create the new lock
+(install). Between the two steps the lock path was ABSENT:
+
+- a third process arriving in the gap could `O_EXCL`-create and become the
+  owner while the claimant was mid-protocol (an unclaimed owner leapfrogging
+  the claim winner);
+- worse, a successor with an older stale observation could blind-rename a
+  LIVE lock installed in the gap, and its "restore" rename could clobber
+  yet another creator's lock — two processes both believing they own;
+- the attempt loop's exhaustion path could also return `held-elsewhere`
+  after the claimant had itself written the lock.
+
+Fix (as described in §1.3): snapshot-verify (hard link) before any write, an
+exclusive link-fence per succession, and a single `rename` replacement as
+the install — the lock path is never absent and there is no restore path
+anywhere. The attempt loop cleans its own files on every exit path and
+records ownership only after the post-install read-back.
+
+Regression test (fails on the round-1 code, passes now): `takeover never
+leaves the lock path absent; an attempt fired inside any absence cannot
+leapfrog the claimant` — a watcher child busy-polls the lock path and
+releases a third takeover attempt at the FIRST observed absence; asserts
+`absentCount === 0`, the claimant is the one who acquired, the in-gap
+attempter fails closed, and the final lock names the claimant. On the
+round-1 code the watcher observed the lock absent during takeover
+(reproduced: 1–2 absences per round) and the leapfrog path was live.
+Stability: re-run 4× plus the full suite; the link-based protocol was also
+verified manually on drvfs (`/mnt/d`, NTFS through 9p) where the real host
+workspaces live.
 
 ## 3. Actual host calls against the fixed server
 
@@ -168,7 +209,8 @@ limitation as the previous iteration, now documented in the host READMEs).
 - Tests: `packages/mcp/test/safety.test.ts` (new), `lock.test.ts` (3→9),
   `helpers.ts` (new shared harness), `fixtures/mini-provider.ts` (pre-commit
   hold, commit-then-status, never-respond, request log),
-  `fixtures/takeover-child.ts` (new), `mcp.test.ts` refactored onto helpers.
+  `fixtures/takeover-child.ts` and `fixtures/watch-lock-child.ts` (new),
+  `mcp.test.ts` refactored onto helpers.
 - Wording: `reports/PUBLIC_PROOF_RESULT.md`, both host READMEs.
 - New: this report. `examples/crash-demo.mjs` unchanged and re-verified.
 
@@ -178,8 +220,21 @@ limitation as the previous iteration, now documented in the host READMEs).
   foreign-host lock (WSL vs Windows on one shared directory) still fails
   closed and needs operator removal; pid liveness for OTHER pids cannot
   attribute reuse (only same-pid attribution via startedAt is decidable).
-  Cross-process mutual exclusion relies on rename atomicity of the local
-  filesystem (true on ext4/NTFS; not attempted on network filesystems).
+  The protocol relies on `rename` and hard-`link` atomicity of the local
+  filesystem — verified on ext4 and drvfs/NTFS; NOT attempted on FAT/exFAT
+  or network filesystems (no hard links there).
+- Residual theoretical window (much narrower than any predecessor, stated
+  for honesty): two protocol participants passing their final snapshot
+  verification at the same instant and both installing could in principle
+  interleave on a filesystem with non-linearizable rename; the fence makes
+  this additionally require a provably-dead-claimant confusion. The SQLite
+  unique effect key plus the PREPARED re-entry contract remain the deep
+  backstop (as the task file itself notes).
+- Crash litter: unique-named `mcp-owner.snap.*` / `next` / `claimant` files
+  and a lingering `mcp-owner.claim.<hash>` fence are inert (a fence only
+  gates a succession whose stale body no longer sits on the lock); legacy
+  `mcp-owner.lock.stale.*` tombstones from the round-1 design are swept
+  opportunistically after acquisition.
 - `relay_reconcile_operation` maps a provider's proven "not found" to FAILED
   — correct only when the reconcile endpoint is truthful; a lying provider
   defeats it (documented since M1).

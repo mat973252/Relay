@@ -128,6 +128,7 @@ describe("workspace ownership lock", () => {
 
 describe("cross-process takeover race", () => {
   const CHILD = fileURLToPath(new URL("./fixtures/takeover-child.js", import.meta.url));
+  const WATCHER = fileURLToPath(new URL("./fixtures/watch-lock-child.js", import.meta.url));
 
   it("two independent successors racing for one stale lock: exactly one owner", { timeout: 60_000 }, async () => {
     for (let round = 0; round < 3; round += 1) {
@@ -174,6 +175,77 @@ describe("cross-process takeover race", () => {
       const onDisk = JSON.parse(readLockRaw(dir));
       assert.equal(onDisk.pid, winner.pid, "the lock names the winner");
       assert.equal(onDisk.hostname, hostname());
+    }
+  });
+
+  it("takeover never leaves the lock path absent; an attempt fired inside any absence cannot leapfrog the claimant", { timeout: 90_000 }, async () => {
+    const collect = (child: ReturnType<typeof spawn>): Promise<{ kind: string; pid: number }> =>
+      new Promise((resolve, reject) => {
+        let buffer = "";
+        const timer = setTimeout(() => reject(new Error("child never reported")), 25_000);
+        child.stdout!.on("data", (d: Buffer) => {
+          buffer += d.toString();
+          const line = buffer.split("\n").find((l) => l.trim().length > 0);
+          if (line !== undefined) {
+            clearTimeout(timer);
+            try {
+              resolve(JSON.parse(line) as { kind: string; pid: number });
+            } catch (err) {
+              reject(err instanceof Error ? err : new Error(String(err)));
+            }
+          }
+        });
+      });
+
+    for (let round = 0; round < 3; round += 1) {
+      const dir = mkdtempSync(join(tmp, `window${String(round)}-`));
+      writeLock(dir, { pid: 999_998 - round, hostname: hostname(), startedAt: 1 });
+      const barrierW = join(dir, "barrier-w");
+      const trigger = join(dir, "trigger"); // written by the watcher at the FIRST absence
+      const stop = join(dir, "stop");
+      const reportPath = join(dir, "watch-report.json");
+
+      const watcher = spawn(process.execPath, [WATCHER, join(dir, LOCK), trigger, stop, reportPath], {
+        stdio: ["ignore", "ignore", "inherit"],
+      });
+      const winner = spawn(process.execPath, [CHILD, dir, barrierW], { stdio: ["ignore", "pipe", "inherit"] });
+      const opportunist = spawn(process.execPath, [CHILD, dir, trigger], { stdio: ["ignore", "pipe", "inherit"] });
+
+      await new Promise((r) => setTimeout(r, 200)); // both children + watcher are up
+      writeFileSync(barrierW, "go");
+      const wResult = await collect(winner);
+      writeFileSync(stop, "go"); // watcher exits and reports
+      await new Promise((r) => setTimeout(r, 150));
+      if (!existsSync(trigger)) writeFileSync(trigger, "go"); // fallback when no window ever opened
+      const tResult = await collect(opportunist);
+
+      // Attach close handlers BEFORE killing (the watcher may already have
+      // exited on its own — a late `on("close")` would never fire).
+      const closed = [watcher, winner, opportunist].map((c) =>
+        new Promise((r) => {
+          if (c.exitCode !== null) r(null);
+          else c.once("close", () => r(null));
+        }),
+      );
+      watcher.kill("SIGKILL");
+      winner.kill("SIGKILL");
+      opportunist.kill("SIGKILL");
+      await Promise.all(closed);
+
+      const report = JSON.parse(readFileSync(reportPath, "utf8")) as { absentCount: number; triggered: boolean };
+      assert.equal(
+        report.absentCount,
+        0,
+        `round ${String(round)}: the lock path went absent ${String(report.absentCount)} time(s) during takeover — a claim/install gap exists`,
+      );
+      assert.equal(
+        wResult.kind,
+        "acquired",
+        `round ${String(round)}: the takeover claimant must become the owner (got ${JSON.stringify(wResult)})`,
+      );
+      assert.equal(tResult.kind, "held-elsewhere", "an attempt fired inside a gap must not leapfrog the claimant");
+      const onDisk = JSON.parse(readLockRaw(dir));
+      assert.equal(onDisk.pid, wResult.pid, "the lock names the claimant, not the opportunist");
     }
   });
 

@@ -4,33 +4,57 @@
  * v0.1's effect runner assumes ONE active writer per workspace: an in-flight
  * PREPARED record doubles as the crash-continuation state, so a second
  * concurrent server could race the first across the execute window. This
- * lock makes that assumption explicit. Safety review redesign:
+ * lock makes that assumption explicit.
  *
- *   - acquiring an absent lock = atomic O_EXCL create;
- *   - a live lock whose pid is alive on the same host => REFUSE (fail closed);
- *   - a lock whose pid is dead => takeover via an ATOMIC CLAIM: exactly one
- *     successor wins a `rename(lock -> unique tombstone)`; the loser's rename
- *     fails with ENOENT and it re-reads the winner's live lock and stays
- *     closed. The claim is then verified against the stale body observed
- *     before the rename, so a live owner's replacement lock can never be
- *     stolen silently. No settle delay is involved — the claim is the fence;
+ * Review-round-2 redesign — the invariant the protocol must hold:
+ *
+ *   between the moment a successor first observes a stale lock and the
+ *   moment it finishes installing its own, the lock path is NEVER absent,
+ *   and no successor ever modifies a lock that is not the exact stale body
+ *   it observed (no blind rename-away, no "restore" that can clobber).
+ *
+ * Mechanism (all primitives atomic on ext4/NTFS; hard links verified on
+ * both, same directory only):
+ *
+ *   - acquiring an absent lock = `link(tmp, lock)` (exclusive create; the
+ *     file appears with its full body — no partial-read window);
+ *   - takeover of an observed stale body B:
+ *       (1) SNAPSHOT: `link(lock, snap)` atomically captures whatever the
+ *           lock is NOW; if the snapshot is not exactly B, the situation
+ *           changed — yield WITHOUT touching the lock (this is what makes
+ *           stealing a live owner's replacement lock impossible);
+ *       (2) FENCE: `link(claimant, mcp-owner.claim.<hash(B)>)` — an
+ *           exclusive, gap-free claim of THIS succession; exactly one
+ *           successor can hold it. A fence whose claimant is provably dead
+ *           (dead pid, or same-pid predecessor via startedAt) is recovered
+ *           by a single-winner rename; foreign/unattributable claimants
+ *           fail closed;
+ *       (3) re-SNAPSHOT: the lock must STILL be exactly B;
+ *       (4) INSTALL: `rename(next, lock)` — ONE atomic replacement. The
+ *           lock path is never absent, so no third process can slip into a
+ *           gap and become an unclaimed owner;
+ *       (5) read-back verify; only then is the acquisition recorded.
  *   - PID REUSE: a lock naming THIS pid that this process did not write is
- *     attributable through `startedAt`: written before this module loaded =>
- *     the writer is provably dead (pids are unique among live processes) =>
- *     takeover; otherwise => fail closed;
+ *     attributable through `startedAt`: written before this module loaded
+ *     => the writer is provably dead => takeover; otherwise => fail closed.
  *   - MALFORMED lock data => fail closed (an unreadable lock may be a live
- *     writer's partial state); the operator removes it after investigation;
- *   - release deletes the lock only when the on-disk body is EXACTLY the one
- *     this process wrote and verified (pid + hostname + startedAt), so an
- *     old owner can never remove a successor's lock — including under pid
- *     reuse, because startedAt differs.
+ *     writer's state); the operator removes it after investigation.
+ *   - release deletes the lock only when the on-disk body is EXACTLY the
+ *     one this process wrote and verified (pid + hostname + startedAt), so
+ *     an old owner can never remove a successor's lock — including under
+ *     pid reuse, because startedAt differs.
+ *
+ * Crash litter: unique-named snap/next/claimant files and a lingering
+ * `mcp-owner.claim.<hash>` fence are inert (the fence only ever gates a
+ * succession whose stale body no longer exists); legacy tombstones from the
+ * previous design are swept opportunistically after acquisition.
  *
  * This is local-machine serialization, not distributed locking: no leases,
  * no heartbeats (out of scope by task constraint). Cross-host locks (WSL vs
  * Windows on one shared directory) fail closed.
  */
-import { randomUUID } from "node:crypto";
-import { open, readFile, rename, rm, stat } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { link, readFile, readdir, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { join } from "node:path";
 
@@ -54,12 +78,29 @@ function lockPath(relayDir: string): string {
   return join(relayDir, "mcp-owner.lock");
 }
 
+function fencePath(relayDir: string, hash: string): string {
+  return join(relayDir, `mcp-owner.claim.${hash}`);
+}
+
+/** Stable short identity of an observed body (succession key). */
+function bodyHash(body: LockFileBody): string {
+  return createHash("sha256")
+    .update(JSON.stringify([body.pid, body.hostname, body.startedAt]), "utf8")
+    .digest("hex")
+    .slice(0, 16);
+}
+
+function uniquePath(relayDir: string, kind: string): string {
+  return join(relayDir, `mcp-owner.${kind}.${process.pid}.${randomUUID()}`);
+}
+
 function sameBody(a: LockFileBody, b: LockFileBody): boolean {
   return a.pid === b.pid && a.hostname === b.hostname && a.startedAt === b.startedAt;
 }
 
 type LockRead = { status: "absent" } | { status: "malformed" } | { status: "ok"; body: LockFileBody };
 
+/** Parses {pid, hostname, startedAt}; extra fields (e.g. fence `for`) are tolerated. */
 async function readLockFile(path: string): Promise<LockRead> {
   let raw: string;
   try {
@@ -96,25 +137,50 @@ function pidAlive(pid: number): boolean {
   }
 }
 
-/** Atomic exclusive create of the lock file with our body. */
-async function createLockExclusive(relayDir: string, body: LockFileBody): Promise<"created" | "exists"> {
+/** Liveness of a fence claimant; unattributable identities count as alive (fail closed). */
+function claimantAlive(id: LockFileBody): boolean {
+  if (id.hostname !== hostname()) return true;
+  if (id.pid === process.pid) return id.startedAt >= MODULE_BOOT; // < boot ⇒ dead predecessor (pid reuse)
+  return pidAlive(id.pid);
+}
+
+async function writeBodyFile(path: string, body: object): Promise<void> {
+  await writeFile(path, `${JSON.stringify(body)}\n`, { flag: "wx" });
+}
+
+/** Atomic capture of the CURRENT lock content via a hard link. null = lock vanished. */
+async function captureSnapshot(relayDir: string): Promise<{ path: string; read: LockRead } | null> {
+  const snap = uniquePath(relayDir, "snap");
   try {
-    const fh = await open(lockPath(relayDir), "wx");
-    try {
-      await fh.writeFile(`${JSON.stringify(body)}\n`);
-    } finally {
-      await fh.close();
-    }
-    return "created";
+    await link(lockPath(relayDir), snap);
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "EEXIST") return "exists";
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw err;
+  }
+  return { path: snap, read: await readLockFile(snap) };
+}
+
+async function cleanup(paths: string[]): Promise<void> {
+  await Promise.all(paths.map((p) => rm(p, { force: true }).catch(() => undefined)));
+}
+
+/** Best-effort sweep of tombstones left by the previous lock design. */
+async function sweepLegacyTombstones(relayDir: string): Promise<void> {
+  try {
+    for (const name of await readdir(relayDir)) {
+      if (name.startsWith("mcp-owner.lock.stale.")) {
+        await rm(join(relayDir, name), { force: true }).catch(() => undefined);
+      }
+    }
+  } catch {
+    // relayDir unreadable: litter stays; harmless
   }
 }
 
 /**
  * Try to become the owning MCP writer for this workspace.
- * Resolves with `held-elsewhere` (never throws) when acquisition is refused.
+ * Resolves with `held-elsewhere` (never throws for refusals) when a live
+ * owner exists or the state is not safely attributable.
  */
 export async function takeWorkspaceOwnership(
   relayDir: string,
@@ -122,18 +188,30 @@ export async function takeWorkspaceOwnership(
 ): Promise<Ownership> {
   const now = options.now ?? (() => Date.now());
   const body: LockFileBody = { pid: process.pid, hostname: hostname(), startedAt: now() };
+  let lastObserved: LockFileBody | undefined;
 
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const existing = await readLockFile(lockPath(relayDir));
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const read = await readLockFile(lockPath(relayDir));
 
-    if (existing.status === "malformed") {
+    if (read.status === "malformed") {
       // An unreadable lock may belong to a live writer: fail closed.
       return { kind: "held-elsewhere", owner: undefined };
     }
 
-    if (existing.status === "absent") {
-      const created = await createLockExclusive(relayDir, body);
-      if (created === "exists") continue; // lost a creation race: re-evaluate
+    if (read.status === "absent") {
+      // Exclusive create via tmp+link: the lock appears with its full body.
+      const tmp = uniquePath(relayDir, "next");
+      await writeBodyFile(tmp, body);
+      try {
+        await link(tmp, lockPath(relayDir));
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "EEXIST") {
+          await cleanup([tmp]);
+          continue; // lost a creation race: re-evaluate
+        }
+        throw err;
+      }
+      await cleanup([tmp]);
       const verify = await readLockFile(lockPath(relayDir));
       if (verify.status === "ok" && sameBody(verify.body, body)) {
         acquisitions.set(relayDir, body);
@@ -142,7 +220,8 @@ export async function takeWorkspaceOwnership(
       return { kind: "held-elsewhere", owner: verify.status === "ok" ? verify.body : undefined };
     }
 
-    const stale = existing.body;
+    const stale = read.body;
+    lastObserved = stale;
     if (stale.hostname !== body.hostname) {
       // A lock written by a different host (e.g. WSL vs Windows on the same
       // directory): pid liveness is meaningless across OSes, so stay closed.
@@ -154,50 +233,93 @@ export async function takeWorkspaceOwnership(
       if (mine !== undefined && sameBody(mine, stale)) {
         return { kind: "acquired", owner: mine }; // idempotent re-entry
       }
-      if (stale.startedAt < MODULE_BOOT) {
-        // PID reuse: a predecessor with our pid wrote this before this
-        // process existed; pids are unique among live processes, so the
-        // writer is provably dead. Fall through to the claimed takeover.
-      } else {
-        // Same-pid lock we cannot attribute (future-dated or concurrent
+      if (!(stale.startedAt < MODULE_BOOT)) {
+        // Same-pid lock we cannot attribute (future-dated or a concurrent
         // same-process writer): fail closed.
         return { kind: "held-elsewhere", owner: stale };
       }
+      // startedAt < MODULE_BOOT ⇒ the writer with our pid predates this
+      // process: provably dead (pids are unique among live processes).
     } else if (pidAlive(stale.pid)) {
       return { kind: "held-elsewhere", owner: stale };
     }
 
-    // Stale lock (dead owner or provably dead same-pid predecessor):
-    // atomic claim — exactly ONE successor's rename can succeed.
-    const tomb = join(relayDir, `mcp-owner.lock.stale.${process.pid}.${randomUUID()}`);
+    // TAKEOVER of the stale body: claim and install as ONE replacement.
+    const hash = bodyHash(stale);
+    const next = uniquePath(relayDir, "next");
+    const claimantTmp = uniquePath(relayDir, "claimant");
+    await writeBodyFile(next, body);
+    await writeBodyFile(claimantTmp, { pid: body.pid, hostname: body.hostname, startedAt: body.startedAt, for: hash });
+
+    // (1) The lock must STILL be exactly the stale body we observed.
+    const snap1 = await captureSnapshot(relayDir);
+    if (snap1 === null) {
+      await cleanup([next, claimantTmp]);
+      continue; // lock vanished underneath us (release / other protocol): re-evaluate
+    }
+    if (snap1.read.status !== "ok" || !sameBody(snap1.read.body, stale)) {
+      await cleanup([snap1.path, next, claimantTmp]);
+      // The lock changed since our observation: someone else owns or is
+      // installing. We never touch the lock itself — no steal, no restore.
+      return { kind: "held-elsewhere", owner: snap1.read.status === "ok" ? snap1.read.body : undefined };
+    }
+
+    // (2) Exclusive fence for THIS succession (atomic create-if-absent).
+    const fence = fencePath(relayDir, hash);
     try {
-      await rename(lockPath(relayDir), tomb);
+      await link(claimantTmp, fence);
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === "ENOENT") continue; // someone else claimed first
-      throw err;
-    }
-    const claimed = await readLockFile(tomb);
-    if (claimed.status !== "ok" || !sameBody(claimed.body, stale)) {
-      // The claimed file is not the stale body we judged: restore it and
-      // stay closed (a live replacement must not be stolen).
-      try {
-        await rename(tomb, lockPath(relayDir));
-      } catch {
-        await rm(tomb, { force: true }); // lockPath exists again: drop the tombstone
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      const holder = await readLockFile(fence);
+      if (holder.status === "ok" && !claimantAlive(holder.body)) {
+        // Provably dead claimant: recover the fence, single winner.
+        const dead = uniquePath(relayDir, "dead");
+        try {
+          await rename(fence, dead);
+          await rm(dead, { force: true });
+        } catch (err2) {
+          if ((err2 as NodeJS.ErrnoException).code !== "ENOENT") {
+            await cleanup([next, claimantTmp, snap1.path]);
+            return { kind: "held-elsewhere", owner: stale };
+          }
+        }
+        await cleanup([next, claimantTmp, snap1.path]);
+        continue; // retry the whole sequence with a fresh claim
       }
-      return { kind: "held-elsewhere", owner: claimed.status === "ok" ? claimed.body : undefined };
+      // Alive or unattributable claimant holds the fence: fail closed.
+      await cleanup([next, claimantTmp, snap1.path]);
+      return { kind: "held-elsewhere", owner: stale };
     }
-    await rm(tomb, { force: true });
-    const created = await createLockExclusive(relayDir, body);
-    if (created === "exists") continue; // a successor won the recreate race: re-evaluate
+
+    // (3) Final re-verify: still exactly the stale body.
+    const snap2 = await captureSnapshot(relayDir);
+    if (snap2 === null || snap2.read.status !== "ok" || !sameBody(snap2.read.body, stale)) {
+      const junk = [next, claimantTmp, snap1.path, fence];
+      if (snap2 !== null) junk.push(snap2.path);
+      await cleanup(junk);
+      continue;
+    }
+
+    // (4) INSTALL: one atomic replacement — the lock path is never absent.
+    try {
+      await rename(next, lockPath(relayDir));
+    } catch (err) {
+      await cleanup([claimantTmp, snap1.path, snap2.path, fence, next]);
+      return { kind: "held-elsewhere", owner: undefined };
+    }
+
+    // (5) Read-back verify, then record and clean the fence.
     const verify = await readLockFile(lockPath(relayDir));
+    await cleanup([claimantTmp, snap1.path, snap2.path, fence]);
     if (verify.status === "ok" && sameBody(verify.body, body)) {
       acquisitions.set(relayDir, body);
+      await sweepLegacyTombstones(relayDir);
       return { kind: "acquired", owner: body };
     }
+    // We were replaced by a non-protocol writer: the lock on disk is theirs.
     return { kind: "held-elsewhere", owner: verify.status === "ok" ? verify.body : undefined };
   }
-  return { kind: "held-elsewhere", owner: undefined };
+  return { kind: "held-elsewhere", owner: lastObserved };
 }
 
 /**
