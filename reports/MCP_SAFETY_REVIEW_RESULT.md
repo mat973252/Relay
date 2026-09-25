@@ -38,8 +38,10 @@ recorded output; the Codex auth copy lived only in a disposable temp
    impossible; there is no "restore" path at all); (2) exclusive FENCE
    `link(claimant → mcp-owner.claim.<hash(B)>)` — gap-free, exactly one
    successor per succession; a fence whose claimant is provably dead (dead
-   pid, or same-pid predecessor via startedAt) is recovered by a
-   single-winner rename, foreign/unattributable claimants fail closed;
+   pid, or same-pid predecessor via startedAt) is TRANSFERRED by a single
+   atomic rename replacement (snapshot-verified against the exact dead
+   body, read back afterwards) so the fence name is never absent;
+   foreign/unattributable claimants fail closed;
    (3) re-snapshot must still show B; (4) INSTALL via `rename(next → lock)`
    — the lock path is NEVER absent, so no third process can slip into a
    gap; (5) read-back verify. `settleMs` is gone entirely. `startedAt` is
@@ -95,8 +97,8 @@ recorded output; the Codex auth copy lived only in a disposable temp
 ## 2. Reproducible local evidence
 
 `corepack pnpm check` — typecheck + full suite:
-**143 tests, 143 pass, 0 fail, 0 skipped** (epistemic 8, core 40,
-artifact-fs 12, storage-sqlite 17, cli 33, **mcp 26**, adapter-pi 7).
+**144 tests, 144 pass, 0 fail, 0 skipped** (epistemic 8, core 40,
+artifact-fs 12, storage-sqlite 17, cli 33, **mcp 27**, adapter-pi 7).
 
 Regression-first: every new safety test was run against the pre-fix code and
 failed there before the fix landed —
@@ -108,13 +110,14 @@ PREPARED-key reconcile mutating to FAILED, commit-then-409 and commit-then-408
 settled FAILED, never-responding request hanging past any bound,
 list without actionId/operationId/intent, config change silently reusing an
 operation id, endpoints without `{operationId}` accepted;
-`packages/mcp/test/lock.test.ts` (10 tests, was 3): malformed lock taken over
+`packages/mcp/test/lock.test.ts` (11 tests, was 3): malformed lock taken over
 (fail-open), release deleting a successor's same-pid lock (startedAt
 unchecked), pid-reuse predecessor lock stuck closed, the claim/install gap
-(see "Review round 2"), plus the invariant
-suite — two independent successor PROCESSES racing one stale lock over three
-rounds yield exactly one owner whose pid the lock names, and a live owner is
-respected during a concurrent takeover attempt (re-run 4×: stable).
+(see "Review round 2"), the fence-recovery gap (see "Review round 3"), plus
+the invariant suite — two independent successor PROCESSES racing one stale
+lock over three rounds yield exactly one owner whose pid the lock names, and
+a live owner is respected during a concurrent takeover attempt (re-run 4×:
+stable).
 The only new test that also passed pre-fix is the configured-rejection
 FAILED case (an invariant both designs share).
 
@@ -153,6 +156,40 @@ round-1 code the watcher observed the lock absent during takeover
 Stability: re-run 4× plus the full suite; the link-based protocol was also
 verified manually on drvfs (`/mnt/d`, NTFS through 9p) where the real host
 workspaces live.
+
+## 2b. Review round 3 — the fence-recovery gap
+
+Round 2's dead-claimant recovery was still a remove-then-recreate on the
+fence's fixed name: rename the dead fence away, `rm` it, `continue`, and
+re-claim later. During that interval the succession had NO fence — and a
+successor stuck in the old recovery could even rename away and delete a
+fence that another process had legitimately re-claimed in the gap,
+producing two simultaneous live fence-holders and with them two possible
+installers. The lock path itself was never absent, but the invariant
+"only the fence holder installs" had an unprotected window.
+
+Fix: the recovery is now a TRANSFER — a single atomic `rename(claim →
+fence)` replacement. Before replacing, the fence is hard-link snapshotted
+and must still show the EXACT dead body observed (a fence that changed —
+e.g. another transferee's live claim — is never touched); after replacing,
+the fence is read back and must name the transferee, else it lost the race
+and fails closed. The fence name is therefore never absent, and a won
+transfer flows straight into the re-verify + install steps WHILE holding
+the fence. Additionally, after installing, the new owner re-checks the
+fence as the succession's authority: if another transferee superseded it
+mid-protocol, the installer yields and removes only its own exact lock
+body (never anyone else's).
+
+Regression test (fails on the round-2 code, passes now): `dead-claimant
+fence recovery never leaves the succession unprotected; an attempt fired
+inside any gap cannot leapfrog` — the workspace is seeded with a stale
+lock PLUS a fence naming a dead claimant; two successors race through the
+recovery path while a watcher busy-polls for the forbidden state (fence
+absent while the lock still carries the exact stale body) and releases a
+third takeover attempt at the first occurrence. On the round-2 code the
+watcher observed the succession unprotected (1–2 times per round); the
+fixed code keeps it at zero across repeated runs. Stability: re-run 4×
+plus the full suite.
 
 ## 3. Actual host calls against the fixed server
 
@@ -209,8 +246,9 @@ limitation as the previous iteration, now documented in the host READMEs).
 - Tests: `packages/mcp/test/safety.test.ts` (new), `lock.test.ts` (3→9),
   `helpers.ts` (new shared harness), `fixtures/mini-provider.ts` (pre-commit
   hold, commit-then-status, never-respond, request log),
-  `fixtures/takeover-child.ts` and `fixtures/watch-lock-child.ts` (new),
-  `mcp.test.ts` refactored onto helpers.
+  `fixtures/takeover-child.ts`, `fixtures/watch-lock-child.ts`, and
+  `fixtures/watch-fence-child.ts` (new), `mcp.test.ts` refactored onto
+  helpers.
 - Wording: `reports/PUBLIC_PROOF_RESULT.md`, both host READMEs.
 - New: this report. `examples/crash-demo.mjs` unchanged and re-verified.
 
@@ -226,10 +264,12 @@ limitation as the previous iteration, now documented in the host READMEs).
 - Residual theoretical window (much narrower than any predecessor, stated
   for honesty): two protocol participants passing their final snapshot
   verification at the same instant and both installing could in principle
-  interleave on a filesystem with non-linearizable rename; the fence makes
-  this additionally require a provably-dead-claimant confusion. The SQLite
-  unique effect key plus the PREPARED re-entry contract remain the deep
-  backstop (as the task file itself notes).
+  interleave on a filesystem with non-linearizable rename; the fence
+  transfer's snapshot + read-back and the post-install fence-authority
+  check make this require an inverted microsecond-scale interleaving of
+  two full claim sequences. The SQLite unique effect key plus the PREPARED
+  re-entry contract remain the deep backstop (as the task file itself
+  notes).
 - Crash litter: unique-named `mcp-owner.snap.*` / `next` / `claimant` files
   and a lingering `mcp-owner.claim.<hash>` fence are inert (a fence only
   gates a succession whose stale body no longer sits on the lock); legacy

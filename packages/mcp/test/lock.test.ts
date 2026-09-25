@@ -16,6 +16,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from "no
 import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
 import { hostname } from "node:os";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, describe, it } from "node:test";
@@ -129,6 +130,16 @@ describe("workspace ownership lock", () => {
 describe("cross-process takeover race", () => {
   const CHILD = fileURLToPath(new URL("./fixtures/takeover-child.js", import.meta.url));
   const WATCHER = fileURLToPath(new URL("./fixtures/watch-lock-child.js", import.meta.url));
+  const FENCE_WATCHER = fileURLToPath(new URL("./fixtures/watch-fence-child.js", import.meta.url));
+
+  /** Mirrors the on-disk fence naming contract: claim.<sha256([pid,hostname,startedAt])[:16]>. */
+  function fenceName(body: LockFileBody): string {
+    const hash = createHash("sha256")
+      .update(JSON.stringify([body.pid, body.hostname, body.startedAt]), "utf8")
+      .digest("hex")
+      .slice(0, 16);
+    return `mcp-owner.claim.${hash}`;
+  }
 
   it("two independent successors racing for one stale lock: exactly one owner", { timeout: 60_000 }, async () => {
     for (let round = 0; round < 3; round += 1) {
@@ -246,6 +257,96 @@ describe("cross-process takeover race", () => {
       assert.equal(tResult.kind, "held-elsewhere", "an attempt fired inside a gap must not leapfrog the claimant");
       const onDisk = JSON.parse(readLockRaw(dir));
       assert.equal(onDisk.pid, wResult.pid, "the lock names the claimant, not the opportunist");
+    }
+  });
+
+  it("dead-claimant fence recovery never leaves the succession unprotected; an attempt fired inside any gap cannot leapfrog", { timeout: 90_000 }, async () => {
+    const collect = (child: ReturnType<typeof spawn>): Promise<{ kind: string; pid: number }> =>
+      new Promise((resolve, reject) => {
+        let buffer = "";
+        const timer = setTimeout(() => reject(new Error("child never reported")), 25_000);
+        child.stdout!.on("data", (d: Buffer) => {
+          buffer += d.toString();
+          const line = buffer.split("\n").find((l) => l.trim().length > 0);
+          if (line !== undefined) {
+            clearTimeout(timer);
+            try {
+              resolve(JSON.parse(line) as { kind: string; pid: number });
+            } catch (err) {
+              reject(err instanceof Error ? err : new Error(String(err)));
+            }
+          }
+        });
+      });
+    const settle = (children: ReturnType<typeof spawn>[]): Promise<unknown[]> => {
+      const closed = children.map((c) =>
+        new Promise((r) => {
+          if (c.exitCode !== null) r(null);
+          else c.once("close", () => r(null));
+        }),
+      );
+      for (const c of children) c.kill("SIGKILL");
+      return Promise.all(closed);
+    };
+
+    for (let round = 0; round < 2; round += 1) {
+      const dir = mkdtempSync(join(tmp, `fencegap${String(round)}-`));
+      // A stale lock whose succession fence was left behind by a claimant
+      // that died before installing.
+      const stale: LockFileBody = { pid: 999_995 - round, hostname: hostname(), startedAt: 1 };
+      writeLock(dir, stale);
+      const fence = join(dir, fenceName(stale));
+      const hash = fenceName(stale).split(".").pop() ?? "";
+      writeFileSync(
+        fence,
+        `${JSON.stringify({ pid: 999_994 - round, hostname: hostname(), startedAt: 1, for: hash })}\n`,
+      );
+
+      const barrier = join(dir, "barrier");
+      const trigger = join(dir, "trigger"); // written by the watcher at the FIRST unprotected instant
+      const stop = join(dir, "stop");
+      const reportPath = join(dir, "fence-report.json");
+
+      const watcher = spawn(
+        process.execPath,
+        [
+          FENCE_WATCHER,
+          join(dir, LOCK),
+          fence,
+          String(stale.pid),
+          stale.hostname,
+          String(stale.startedAt),
+          trigger,
+          stop,
+          reportPath,
+        ],
+        { stdio: ["ignore", "ignore", "inherit"] },
+      );
+      const s1 = spawn(process.execPath, [CHILD, dir, barrier], { stdio: ["ignore", "pipe", "inherit"] });
+      const s2 = spawn(process.execPath, [CHILD, dir, barrier], { stdio: ["ignore", "pipe", "inherit"] });
+      const opportunist = spawn(process.execPath, [CHILD, dir, trigger], { stdio: ["ignore", "pipe", "inherit"] });
+
+      await new Promise((r) => setTimeout(r, 250)); // children + watcher are up
+      writeFileSync(barrier, "go");
+      const r1 = await collect(s1);
+      const r2 = await collect(s2);
+      writeFileSync(stop, "go"); // watcher exits and reports
+      await new Promise((r) => setTimeout(r, 150));
+      if (!existsSync(trigger)) writeFileSync(trigger, "go"); // fallback when no gap ever opened
+      const r3 = await collect(opportunist);
+
+      await settle([watcher, s1, s2, opportunist]);
+
+      const report = JSON.parse(readFileSync(reportPath, "utf8")) as { gapCount: number; triggered: boolean };
+      assert.equal(
+        report.gapCount,
+        0,
+        `round ${String(round)}: the succession was unprotected ${String(report.gapCount)} time(s) (fence absent while the stale lock was still in place) — a recovery gap exists`,
+      );
+      const acquired = [r1, r2, r3].filter((r) => r.kind === "acquired");
+      assert.equal(acquired.length, 1, `round ${String(round)}: exactly one owner (got ${JSON.stringify([r1, r2, r3])})`);
+      const onDisk = JSON.parse(readLockRaw(dir));
+      assert.equal(onDisk.pid, acquired[0]!.pid, "the lock names the acquirer");
     }
   });
 

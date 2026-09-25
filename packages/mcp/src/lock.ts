@@ -26,9 +26,11 @@
  *       (2) FENCE: `link(claimant, mcp-owner.claim.<hash(B)>)` — an
  *           exclusive, gap-free claim of THIS succession; exactly one
  *           successor can hold it. A fence whose claimant is provably dead
- *           (dead pid, or same-pid predecessor via startedAt) is recovered
- *           by a single-winner rename; foreign/unattributable claimants
- *           fail closed;
+ *           (dead pid, or same-pid predecessor via startedAt) is
+ *           TRANSFERRED by a single atomic rename replacement — snapshot
+ *           verified against the exact dead body and read back afterwards —
+ *           so the fence name is never absent and the succession is never
+ *           unprotected; foreign/unattributable claimants fail closed;
  *       (3) re-SNAPSHOT: the lock must STILL be exactly B;
  *       (4) INSTALL: `rename(next, lock)` — ONE atomic replacement. The
  *           lock path is never absent, so no third process can slip into a
@@ -44,10 +46,14 @@
  *     an old owner can never remove a successor's lock — including under
  *     pid reuse, because startedAt differs.
  *
- * Crash litter: unique-named snap/next/claimant files and a lingering
- * `mcp-owner.claim.<hash>` fence are inert (the fence only ever gates a
- * succession whose stale body no longer exists); legacy tombstones from the
- * previous design are swept opportunistically after acquisition.
+ * Crash litter: unique-named snap/next/claimant/fsnap files are inert
+ * debris. A lingering `mcp-owner.claim.<hash>` fence gates ONLY the
+ * succession whose stale body hash it carries: while that body still sits
+ * on the lock, a dead claimant's fence is transferred atomically (see (2));
+ * once the lock has been replaced the fence is never consulted again —
+ * bodies of later generations hash to different fence names. Legacy
+ * tombstones from the previous design are swept opportunistically after
+ * acquisition.
  *
  * This is local-machine serialization, not distributed locking: no leases,
  * no heartbeats (out of scope by task constraint). Cross-host locks (WSL vs
@@ -271,24 +277,43 @@ export async function takeWorkspaceOwnership(
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
       const holder = await readLockFile(fence);
-      if (holder.status === "ok" && !claimantAlive(holder.body)) {
-        // Provably dead claimant: recover the fence, single winner.
-        const dead = uniquePath(relayDir, "dead");
-        try {
-          await rename(fence, dead);
-          await rm(dead, { force: true });
-        } catch (err2) {
-          if ((err2 as NodeJS.ErrnoException).code !== "ENOENT") {
-            await cleanup([next, claimantTmp, snap1.path]);
-            return { kind: "held-elsewhere", owner: stale };
-          }
-        }
+      if (holder.status !== "ok" || claimantAlive(holder.body)) {
+        // Alive or unattributable claimant holds the fence: fail closed.
         await cleanup([next, claimantTmp, snap1.path]);
-        continue; // retry the whole sequence with a fresh claim
+        return { kind: "held-elsewhere", owner: stale };
       }
-      // Alive or unattributable claimant holds the fence: fail closed.
-      await cleanup([next, claimantTmp, snap1.path]);
-      return { kind: "held-elsewhere", owner: stale };
+      // Provably dead claimant: TRANSFER the fence as ONE atomic replacement
+      // (rename) — the fence name is never absent, so the succession is
+      // never unprotected. Snapshot-verify first so we only ever replace
+      // the exact dead body we observed; read back afterwards so a lost
+      // transfer race fails closed instead of yielding two installers.
+      const dead = holder.body;
+      const fsnap = uniquePath(relayDir, "fsnap");
+      try {
+        await link(fence, fsnap);
+      } catch (err2) {
+        if ((err2 as NodeJS.ErrnoException).code === "ENOENT") {
+          await cleanup([next, claimantTmp, snap1.path]);
+          continue; // fence vanished (another transfer): re-evaluate
+        }
+        throw err2;
+      }
+      const observed = await readLockFile(fsnap);
+      await rm(fsnap, { force: true });
+      if (observed.status !== "ok" || !sameBody(observed.body, dead)) {
+        // The fence changed under us (another transferee won): re-evaluate.
+        await cleanup([next, claimantTmp, snap1.path]);
+        continue;
+      }
+      await rename(claimantTmp, fence); // atomic replace; fence never absent
+      const transferred = await readLockFile(fence);
+      if (!(transferred.status === "ok" && sameBody(transferred.body, body))) {
+        // Lost the transfer race to another successor: fail closed.
+        await cleanup([next, snap1.path]);
+        return { kind: "held-elsewhere", owner: stale };
+      }
+      // Transfer won: fall through to re-verify and install WHILE holding
+      // the fence — there is no unprotected interval anywhere.
     }
 
     // (3) Final re-verify: still exactly the stale body.
@@ -308,16 +333,29 @@ export async function takeWorkspaceOwnership(
       return { kind: "held-elsewhere", owner: undefined };
     }
 
-    // (5) Read-back verify, then record and clean the fence.
+    // (5) Read-back verify, then fence-authority check, then record.
     const verify = await readLockFile(lockPath(relayDir));
-    await cleanup([claimantTmp, snap1.path, snap2.path, fence]);
-    if (verify.status === "ok" && sameBody(verify.body, body)) {
-      acquisitions.set(relayDir, body);
-      await sweepLegacyTombstones(relayDir);
-      return { kind: "acquired", owner: body };
+    if (!(verify.status === "ok" && sameBody(verify.body, body))) {
+      // We were replaced by a non-protocol writer: the lock on disk is theirs.
+      await cleanup([claimantTmp, snap1.path, snap2.path, fence]);
+      return { kind: "held-elsewhere", owner: verify.status === "ok" ? verify.body : undefined };
     }
-    // We were replaced by a non-protocol writer: the lock on disk is theirs.
-    return { kind: "held-elsewhere", owner: verify.status === "ok" ? verify.body : undefined };
+    const authority = await readLockFile(fence);
+    if (!(authority.status === "ok" && sameBody(authority.body, body))) {
+      // Another transferee superseded our fence mid-protocol: the fence —
+      // not our completed rename — is the authority for this succession.
+      // Yield and remove ONLY our own exact lock body, never anyone else's.
+      const current = await readLockFile(lockPath(relayDir));
+      if (current.status === "ok" && sameBody(current.body, body)) {
+        await rm(lockPath(relayDir), { force: true });
+      }
+      await cleanup([snap1.path, snap2.path]);
+      return { kind: "held-elsewhere", owner: undefined };
+    }
+    acquisitions.set(relayDir, body);
+    await cleanup([claimantTmp, snap1.path, snap2.path, fence]);
+    await sweepLegacyTombstones(relayDir);
+    return { kind: "acquired", owner: body };
   }
   return { kind: "held-elsewhere", owner: lastObserved };
 }
