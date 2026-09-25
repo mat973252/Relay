@@ -302,6 +302,15 @@ export class RelayMcpServer {
     return { content: [{ type: "text", text }], isError: outcome.status === "failed" };
   }
 
+  /**
+   * Status values the status-field contract proves mean executed/committed.
+   * Everything else — "pending", unknown values, missing/non-string fields —
+   * is NOT proof of execution and must resolve UNKNOWN, never CONFIRMED.
+   */
+  private static completeStatusesFor(action: ConfiguredAction): readonly string[] {
+    return action.reconcile.completeStatuses ?? ["complete"];
+  }
+
   private static async executeAction(action: ConfiguredAction, operationId: string): Promise<unknown> {
     const headers: Record<string, string> = { ...action.http.headers };
     for (const [header, envName] of Object.entries(action.http.secretHeaders ?? {})) {
@@ -336,13 +345,36 @@ export class RelayMcpServer {
         `provider answered HTTP ${String(res.status)} for ${action.id}: not provably a pre-commit rejection`,
       );
     }
+    // HTTP 202 is "accepted": the provider took the request but has not
+    // executed it. Acceptance is never proof of execution.
+    if (res.status === 202) {
+      throw new AmbiguousEffectError(
+        `provider accepted ${action.id} (HTTP 202): work is queued, not proven executed — reconcile to learn the outcome`,
+      );
+    }
+    let body: unknown;
     try {
-      return (await res.json()) as unknown;
+      body = (await res.json()) as unknown;
     } catch (err) {
       throw new AmbiguousEffectError(
         `provider 2xx body for ${action.id} was not parseable: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
+    if (action.reconcile.shape === "status-field") {
+      // The same status-field contract the reconcile endpoint uses defines
+      // which 2xx submit bodies prove synchronous execution. Any other body
+      // ({"status":"pending"} included) leaves the outcome ambiguous.
+      const status =
+        typeof body === "object" && body !== null
+          ? (body as Record<string, unknown>).status
+          : undefined;
+      if (typeof status !== "string" || !RelayMcpServer.completeStatusesFor(action).includes(status)) {
+        throw new AmbiguousEffectError(
+          `provider 2xx for ${action.id} reported status ${JSON.stringify(status ?? null)}: not a contract-proven execution`,
+        );
+      }
+    }
+    return body;
   }
 
   private static async reconcileAction(
@@ -356,11 +388,32 @@ export class RelayMcpServer {
       if (!res.ok) {
         return { found: "uncertain", reason: `reconcile endpoint HTTP ${String(res.status)}` };
       }
-      const body = (await res.json()) as Record<string, unknown>;
-      const executed =
-        action.reconcile.shape === "found-flag" ? body.found === true : body.status === "complete";
-      if (!executed) return { found: false };
-      return { found: true, remoteRef: operationId, result: body };
+      const body: unknown = (await res.json()) as unknown;
+      if (action.reconcile.shape === "found-flag") {
+        // found === true proves execution; found === false is the provider's
+        // explicit proof of non-execution; anything else is unverifiable.
+        if (typeof body === "object" && body !== null && (body as Record<string, unknown>).found === true) {
+          return { found: true, remoteRef: operationId, result: body };
+        }
+        if (typeof body === "object" && body !== null && (body as Record<string, unknown>).found === false) {
+          return { found: false };
+        }
+        return { found: "uncertain", reason: `reconcile body ${JSON.stringify(body)} has no boolean "found" field` };
+      }
+      // status-field: only contract-listed values carry meaning.
+      const status =
+        typeof body === "object" && body !== null ? (body as Record<string, unknown>).status : undefined;
+      if (typeof status !== "string") {
+        return { found: "uncertain", reason: `reconcile body ${JSON.stringify(body)} has no string "status" field` };
+      }
+      if (RelayMcpServer.completeStatusesFor(action).includes(status)) {
+        return { found: true, remoteRef: operationId, result: body };
+      }
+      if ((action.reconcile.notExecutedStatuses ?? []).includes(status)) {
+        return { found: false };
+      }
+      // "pending"/unknown statuses prove neither execution nor non-execution.
+      return { found: "uncertain", reason: `provider status ${JSON.stringify(status)} is unresolved (neither executed nor proven not-executed)` };
     } catch (err) {
       return { found: "uncertain", reason: err instanceof Error ? err.message : String(err) };
     }

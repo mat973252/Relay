@@ -41,9 +41,25 @@ export interface ReconcileEndpoint {
   /**
    * How to interpret a 200 response body:
    *  - "found-flag": body.found === true  => executed remotely
-   *  - "status-field": body.status === "complete" => executed remotely
+   *  - "status-field": body.status ∈ completeStatuses => executed remotely,
+   *    body.status ∈ notExecutedStatuses => PROVEN non-execution (FAILED).
+   * Every other answer (missing field, non-string, any unlisted value —
+   * "pending" included) is unverifiable and leaves the operation UNKNOWN.
    */
   shape: "found-flag" | "status-field";
+  /**
+   * Status-field values the provider contract uses for executed/committed
+   * operations. Default: ["complete"]. Status-field shape only.
+   */
+  completeStatuses?: string[];
+  /**
+   * Status-field values the operator's provider contract PROVES mean the
+   * operation was never executed (definitive FAILED). Everything else —
+   * including "pending" — is unresolved and stays UNKNOWN. Default: none,
+   * so reconcile can never settle FAILED unless the operator opts in.
+   * Status-field shape only.
+   */
+  notExecutedStatuses?: string[];
 }
 
 export interface ConfiguredAction {
@@ -150,6 +166,16 @@ function validateAction(raw: unknown, file: string): ConfiguredAction {
     throw new ActionsConfigError(
       `${file}: action "${a.id}" reconcile.url must bind {operationId} — reconciliation must observe THIS operation, not some aggregate`,
     );
+  }
+  for (const key of ["completeStatuses", "notExecutedStatuses"] as const) {
+    const value = rec[key];
+    if (value === undefined) continue;
+    if (rec.shape !== "status-field") {
+      throw new ActionsConfigError(`${file}: action "${a.id}" reconcile.${key} requires shape "status-field"`);
+    }
+    if (!Array.isArray(value) || value.length === 0 || value.some((s) => typeof s !== "string" || s.length === 0)) {
+      throw new ActionsConfigError(`${file}: action "${a.id}" reconcile.${key} must be a non-empty list of non-empty strings`);
+    }
   }
   for (const [header, envName] of Object.entries((http.secretHeaders as Record<string, unknown>) ?? {})) {
     if (typeof envName !== "string" || envName.length === 0) {

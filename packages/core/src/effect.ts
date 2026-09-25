@@ -73,7 +73,15 @@ export interface EffectJournal {
   list(): Promise<EffectRecord[]>;
 }
 
-/** Read-only reconciliation contract (observation, never replay). */
+/**
+ * Read-only reconciliation contract (observation, never replay).
+ *
+ * - found: true  — the provider PROVES the effect executed (CONFIRMED).
+ * - found: false — the provider PROVES the effect never executed (FAILED).
+ *   Only to be returned on contract-backed proof of non-execution; a
+ *   "pending"/unknown/ambiguous remote answer is NOT such proof.
+ * - found: "uncertain" — neither is proven; the record stays UNKNOWN.
+ */
 export type ReconcileOutcome =
   | { found: true; remoteRef: string | undefined; result: unknown }
   | { found: false }
@@ -207,9 +215,9 @@ function confirmedOutcome(
  * Re-entry:
  *   - CONFIRMED            -> deduplicated confirmed result (no execution).
  *   - PREPARED             -> execution never began; resume by executing (safe continuation).
- *   - SUBMITTED | UNKNOWN  -> reconcile required: found -> CONFIRMED,
- *                             not-found -> FAILED (operator re-issues; no auto replay),
- *                             uncertain -> stays UNKNOWN.
+ *   - SUBMITTED | UNKNOWN  -> reconcile required: proven execution -> CONFIRMED,
+ *                             proven non-execution -> FAILED (operator re-issues;
+ *                             no auto replay), uncertain -> stays UNKNOWN.
  *   - FAILED               -> terminal; returns the failure (operator decides).
  */
 export async function runEffect(input: RunEffectInput): Promise<EffectOutcome> {
