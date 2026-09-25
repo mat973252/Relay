@@ -35,6 +35,7 @@ usage:
   relay artifacts [--json] [--artifacts PATH]
   relay lineage <artifact-ref> [--json] [--artifacts PATH]
   relay effects [--json] [--storage PATH]
+  relay effects --history [--key KEY] [--json] [--storage PATH]
   relay export [--output PATH] [--capabilities PATH] [--adapter-context PATH]
                [--workspace PATH]
   relay import <capsule> [--workspace PATH] [--overwrite]
@@ -175,18 +176,45 @@ async function runArtifactsCommand(rest: string[], cwd: string): Promise<number>
 
 async function runEffectsCommand(rest: string[], cwd: string): Promise<number> {
   let json = false;
+  let history = false;
+  let key: string | undefined;
   let storage: string | undefined;
   for (let i = 0; i < rest.length; i++) {
     const arg = rest[i];
     if (arg === undefined) break;
     if (arg === "--json") json = true;
-    else if (arg === "--storage") {
+    else if (arg === "--history") history = true;
+    else if (arg === "--key") {
+      key = requireValue(rest, i + 1, "--key");
+      i += 1;
+    } else if (arg === "--storage") {
       storage = requireValue(rest, i + 1, "--storage");
       i += 1;
     } else usageError(`unknown argument for effects: ${arg}`);
   }
+  if (key !== undefined && !history) usageError("--key requires --history");
   const journal = await SqliteEffectJournal.open({ path: storage ?? join(cwd, ".relay", "storage.db") });
   try {
+    if (history) {
+      // Read-only. `record` is the latest-state snapshot (execution authority);
+      // `events` are the observed committed transitions; `coverage` says
+      // whether that history is complete, partial, or unavailable (legacy).
+      const histories = await journal.listHistory(key);
+      if (json) {
+        process.stdout.write(`${JSON.stringify({ schema: "relay.effect-history/1", histories })}\n`);
+      } else if (histories.length === 0) {
+        process.stdout.write("(no effects)\n");
+      } else {
+        for (const h of histories) {
+          process.stdout.write(`${h.record.status.padEnd(9)} ${h.record.key}  ${h.record.id}  history=${h.coverage}\n`);
+          for (const e of h.events) {
+            const reason = e.reason === undefined ? "" : `  ${e.reason}`;
+            process.stdout.write(`  #${String(e.seq)} ${e.fromStatus ?? "-"} -> ${e.toStatus} (${e.cause}) @${String(e.at)}${reason}\n`);
+          }
+        }
+      }
+      return 0;
+    }
     const records = await journal.list();
     if (json) {
       process.stdout.write(`${JSON.stringify({ schema: "relay.effects/1", effects: records })}\n`);

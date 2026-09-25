@@ -193,13 +193,21 @@ async function orchestrate() {
     const counter = (await getJson(new URL("/state", provider.baseUrl))).counter;
     const journal = await SqliteEffectJournal.open({ path: dbPath });
     const records = await journal.list();
+    const [history] = await journal.listHistory(`counter-increment:${OPERATION_ID}`);
     journal.close();
     const record = records.find((r) => r.key === `counter-increment:${OPERATION_ID}`);
+    const transitions = (history?.events ?? []).map((e) => `${e.fromStatus ?? "-"}>${e.toStatus}:${e.cause}`);
+    console.log(`  history coverage=${history?.coverage ?? "n/a"} events=${transitions.join(" ")}`);
     const checks = [
       ["remote counter === 1 (no silent duplicate)", counter === 1],
       ["journal record exists", record !== undefined],
       ["journal status === CONFIRMED", record?.status === "CONFIRMED"],
       ["confirmation came via reconciliation", resumed.out.includes("reconciled=true")],
+      [
+        "transition evidence: prepare, submit, reconcile-confirm (no execute-confirm, no invented recovery)",
+        transitions.join(" ") === "->PREPARED:prepare PREPARED>SUBMITTED:submit SUBMITTED>CONFIRMED:reconcile",
+      ],
+      ["last committed event agrees with latest-state row", history?.events.at(-1)?.toStatus === record?.status],
     ];
     let failed = false;
     for (const [label, ok] of checks) {
