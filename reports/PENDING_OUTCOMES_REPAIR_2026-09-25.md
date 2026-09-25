@@ -33,14 +33,25 @@ uncertain -> UNKNOWN stays, CONFIRMED/FAILED stay terminal, no resubmission).
 
 Config additions (`mcp-actions.json`, `status-field` only, validated:
 non-empty string lists): `reconcile.completeStatuses`, `reconcile.notExecutedStatuses`.
-Not folded into `actionFingerprint`: they interpret the same remote meaning.
+
+Independent-review hardening (second commit): `"pending"` (any case) is
+rejected in both lists — a pending status is never a terminal proof — and
+overlapping `completeStatuses`/`notExecutedStatuses` is rejected, since a
+status cannot prove both execution and non-execution. The lists are also
+bound into `actionFingerprint`: an explicitly configured status contract
+changes the remote interpretation, so `runEffect` refuses to reuse an
+operation recorded under a different one (rejected before any remote call).
+When both options are absent, `stableStringify` drops them and the hash is
+byte-identical to the pre-repair one, so existing default configs keep
+reusing their operation ids.
 
 ## Tests
 
-New `packages/mcp/test/pending-outcomes.test.ts` (11 tests) with a
-`pending-provider` fixture (accept-then-commit). At the base commit 7 of 11
-fail — both reproduced bugs plus the unverifiable-status cases — and all 11
-pass after the fix:
+New `packages/mcp/test/pending-outcomes.test.ts` (13 tests, expanded to 13
+for the review findings) with a `pending-provider` fixture
+(accept-then-commit). At the base commit 7 of the original 11 fail — both
+reproduced bugs plus the unverifiable-status cases — and all 13 pass after
+the fix:
 
 - submit `202 {"status":"pending"}` and `200 {"status":"pending"}` with no
   remote commit -> outcome `unknown`, journal UNKNOWN (was CONFIRMED);
@@ -52,6 +63,12 @@ pass after the fix:
   FAILED, zero additional POSTs (reconcile never resubmits);
 - accept-then-commit provider: submit stays UNKNOWN, later reconcile proves
   execution -> CONFIRMED with exactly one POST and one remote commit;
+- config rejects `completeStatuses:["pending"]`, `["PENDING"]`,
+  `notExecutedStatuses:["pending"]`, and overlapping lists — exit 78;
+- status lists bound into request identity: after a default-contract
+  UNKNOWN is recorded, a config with different status lists rejects reuse
+  (`different effect`) BEFORE any remote reconcile call; restoring the
+  default contract makes the operation reconcilable again;
 - preserved: found-flag synchronous 200 -> CONFIRMED; `status:"complete"`
   submit -> CONFIRMED; configured `rejectStatuses` -> FAILED.
 
@@ -64,10 +81,10 @@ by `packages/adapter-pi/node_modules/.bin` on PATH. Fake providers only, all
 | Command | Node | Result |
 |---|---|---|
 | `pnpm typecheck` (`tsc -b`) | v24.19.0 | pass |
-| `PATH=…/adapter-pi/node_modules/.bin:$PATH pnpm test` | v24.19.0 | 155 pass / 0 fail (core 40, epistemic 8, artifact-fs 12, storage-sqlite 17, cli 33, mcp 38 incl. 11 new, adapter-pi 7) |
+| `PATH=…/adapter-pi/node_modules/.bin:$PATH pnpm test` | v24.19.0 | 157 pass / 0 fail (core 40, epistemic 8, artifact-fs 12, storage-sqlite 17, cli 33, mcp 40 incl. 13 new, adapter-pi 7) |
 | `node examples/crash-demo.mjs` | v24.19.0 | PASS x4, remote counter = 1 |
 | `pnpm typecheck` | v22.23.3 | pass |
-| `pnpm test` (same PATH) | v22.23.3 | 155 pass / 0 fail |
+| `pnpm test` (same PATH) | v22.23.3 | 157 pass / 0 fail |
 | `node examples/crash-demo.mjs` | v22.23.3 | PASS x4, remote counter = 1 |
 
 Two-process lock regressions are inside the mcp suite (`lock.test.ts`:

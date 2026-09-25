@@ -14,6 +14,7 @@
  *  - proven synchronous completion and definitive rejection keep working.
  */
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { rmSync } from "node:fs";
 import { after, describe, it } from "node:test";
 import { startMiniProvider } from "./fixtures/mini-provider.js";
@@ -25,6 +26,7 @@ import {
   makeWorkspace,
   writeActions,
   writeRawActions,
+  MAIN,
 } from "./helpers.js";
 
 const tmp = makeTempRoot("relay-mcp-pending-");
@@ -221,6 +223,88 @@ describe("reconcile must distinguish executed / not-executed / unresolved", () =
     } finally {
       client.kill();
       await client.exit;
+      await provider.stop();
+    }
+  });
+});
+
+describe("status contract config validation", () => {
+  it("rejects 'pending' (any case) and overlapping lists at config load (exit 78)", { timeout: 60_000 }, async () => {
+    const provider = await startPendingProvider();
+    await provider.stop();
+    const badContracts: Array<[string, Record<string, unknown>, RegExp]> = [
+      ["pending-as-complete", { completeStatuses: ["pending"] }, /pending/i],
+      ["PENDING-as-complete", { completeStatuses: ["PENDING"] }, /pending/i],
+      ["pending-as-not-executed", { notExecutedStatuses: ["pending"] }, /pending/i],
+      [
+        "overlap",
+        { completeStatuses: ["complete", "failed"], notExecutedStatuses: ["failed"] },
+        /overlap/i,
+      ],
+    ];
+    for (const [label, extraReconcile, pattern] of badContracts) {
+      const workspace = makeWorkspace(tmp, `bad-${label}`);
+      writeStatusFieldActions(workspace, provider.baseUrl, extraReconcile);
+      const result = await new Promise<{ status: number | null; stderr: string }>((resolve) => {
+        const child = spawn(process.execPath, [MAIN, "--workspace", workspace], { stdio: ["ignore", "ignore", "pipe"] });
+        let stderr = "";
+        child.stderr.on("data", (d: Buffer) => (stderr += d.toString()));
+        child.on("close", (status) => resolve({ status, stderr }));
+      });
+      assert.equal(result.status, 78, `${label}: expected config refusal, stderr: ${result.stderr}`);
+      assert.match(result.stderr, pattern, label);
+    }
+  });
+});
+
+describe("status semantics are bound into request identity", () => {
+  it("changed status lists reject reuse of an existing operation id before any remote call", { timeout: 90_000 }, async () => {
+    const provider = await startPendingProvider({ submitStatus: 409 });
+    const workspace = makeWorkspace(tmp, "fpchange");
+    writeStatusFieldActions(workspace, provider.baseUrl);
+    const client = await connectClient(workspace);
+    try {
+      const res = await client.call("relay_submit_action", { actionId: ACTION, operationId: "op-fp" });
+      const outcome = JSON.parse(res.text.split("\n")[0] ?? "") as { status: string };
+      assert.equal(outcome.status, "unknown", res.text);
+    } finally {
+      client.kill();
+      await client.exit;
+    }
+
+    // Same action id/URL/method but a different status contract: interpreting
+    // the remote status differently must not reuse the recorded operation.
+    writeStatusFieldActions(workspace, provider.baseUrl, {
+      completeStatuses: ["done"],
+      notExecutedStatuses: ["failed"],
+    });
+    const client2 = await connectClient(workspace);
+    try {
+      const rec = await client2.call("relay_reconcile_operation", { actionId: ACTION, operationId: "op-fp" });
+      assert.equal(rec.isError, true, "a changed status contract is a different effect");
+      assert.match(rec.text, /different effect/);
+      assert.equal(await journalStatus(workspace, `${ACTION}:op-fp`), "UNKNOWN", "journal untouched");
+      assert.equal(
+        provider.requests().filter((r) => r.startsWith("GET") && r.includes("op-fp")).length,
+        0,
+        "identity mismatch must be rejected before any remote reconcile call",
+      );
+    } finally {
+      client2.kill();
+      await client2.exit;
+    }
+
+    // Restoring the default contract makes the operation recoverable again.
+    writeStatusFieldActions(workspace, provider.baseUrl);
+    const client3 = await connectClient(workspace);
+    try {
+      const rec = await client3.call("relay_reconcile_operation", { actionId: ACTION, operationId: "op-fp" });
+      assert.equal(rec.isError, false, rec.text);
+      assert.match(rec.text, /"status":"unknown"/);
+      assert.equal(await journalStatus(workspace, `${ACTION}:op-fp`), "UNKNOWN");
+    } finally {
+      client3.kill();
+      await client3.exit;
       await provider.stop();
     }
   });
