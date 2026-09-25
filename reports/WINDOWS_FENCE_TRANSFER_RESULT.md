@@ -69,13 +69,27 @@ fence)`) is the reproduction evidence. Deterministic local regression:
   `mcp-owner.claim.*`. **Before the fix: fails** (the uncaught EPERM
   propagates out of `takeWorkspaceOwnership` — the exact reported crash
   class). **After: passes** — the fence is never renamed.
-- `SIMULATED transient EPERM on the install rename is retried; a changed
-  lock is never renamed over` — **before: fails** (first denial returned
-  `held-elsewhere` permanently). **After: passes** (bounded retry).
+- `SIMULATED transient EPERM on the install rename is retried` — **before:
+  fails** (first denial returned `held-elsewhere` permanently). **After:
+  passes** (bounded retry; `denials === 2` proves the injection fires —
+  injection matching uses `basename`, so it triggers on Windows paths too).
+- `a lock swapped to a live owner between install retries is never renamed
+  over (fail closed)` — the first install attempt is denied and a genuinely
+  live owner's body lands on the lock; the retry re-verifies the stale body,
+  returns `held-elsewhere` naming that owner, makes no second rename, and
+  leaves the live lock and the dead claimant's fence untouched.
 - `a second dead claimant advances the claim chain instead of renaming over
   the first fence` — chained double-death transfer.
 - `a live claimant at the transfer level still fails closed` — no leapfrog
   via the chain.
+
+Cleanup audit: `cleanup()` removes only the unique-named debris files the
+attempt itself created (`next`/`claimantTmp`); `sweepLitter` removes only
+`mcp-owner.lock.stale.*`/`.snap.*`/`.fsnap.*`/`.next.*`/`.claimant.*`
+debris — never `mcp-owner.lock` or `mcp-owner.claim.*`; the yield path
+removes the lock only when the on-disk body exactly equals this process's
+recorded body; `release` likewise. No path can delete or overwrite another
+owner's lock or claim file.
 
 ## Tests run
 
@@ -83,13 +97,13 @@ fence)`) is the reproduction evidence. Deterministic local regression:
 | --- | --- | --- |
 | `pnpm install --frozen-lockfile` | Node 24.19.0 / pnpm 10.33.0 | OK |
 | `npx tsc -b packages/cli && pnpm typecheck` (pre-existing CLI-first build-order workaround) | Node 24.19.0 | OK |
-| `node --test dist/test/lock.test.js` (×3) | Node 24.19.0 | 15/15 pass each run |
-| `pnpm --filter @relay/mcp test` | Node 24.19.0 | 45/45 pass |
+| `node --test dist/test/lock.test.js` (×3) | Node 24.19.0 | 16/16 pass each run |
+| `pnpm --filter @relay/mcp test` | Node 24.19.0 | 46/46 pass |
 | `pnpm --filter @relay/adapter-pi test` | Node 24.19.0 | 7/7 pass |
 | `node examples/crash-demo.mjs` | Node 24.19.0 | 4/4 PASS, remote counter 1 |
 | `pnpm typecheck` | Node 22.23.3 | OK |
-| `node --test dist/test/lock.test.js` | Node 22.23.3 | 15/15 pass |
-| `pnpm --filter @relay/mcp test` | Node 22.23.3 | 45/45 pass |
+| `node --test dist/test/lock.test.js` | Node 22.23.3 | 16/16 pass |
+| `pnpm --filter @relay/mcp test` | Node 22.23.3 | 46/46 pass |
 | `node examples/crash-demo.mjs` | Node 22.23.3 | 4/4 PASS |
 | Other packages on Node 22: epistemic 8/8, core 40/40, artifact-fs 12/12, storage-sqlite 17/17, adapter-pi 7/7 | Node 22.23.3 | pass |
 | `git diff --check` | — | clean |

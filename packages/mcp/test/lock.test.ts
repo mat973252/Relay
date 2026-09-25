@@ -18,7 +18,7 @@ import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
 import { hostname } from "node:os";
 import { createHash } from "node:crypto";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, describe, it } from "node:test";
 import { takeWorkspaceOwnership, releaseWorkspaceOwnership, type LockFileBody } from "../src/index.js";
@@ -409,8 +409,10 @@ describe("dead-claimant fence transfer (Windows EPERM regression set)", () => {
     const deadClaimant = { ...deadBody(999_992), for: hash };
     writeFileSync(fence, `${JSON.stringify(deadClaimant)}\n`);
 
+    let claimRenames = 0;
     const denyClaimRename = async (oldPath: string, newPath: string): Promise<void> => {
-      if (newPath.includes("mcp-owner.claim.")) {
+      if (basename(newPath).startsWith("mcp-owner.claim.")) {
+        claimRenames += 1;
         const err = new Error("operation not permitted (simulated Windows EPERM)") as NodeJS.ErrnoException;
         err.code = "EPERM";
         throw err;
@@ -419,6 +421,7 @@ describe("dead-claimant fence transfer (Windows EPERM regression set)", () => {
     };
     const result = await takeWorkspaceOwnership(dir, { rename: denyClaimRename });
     assert.equal(result.kind, "acquired", "claim transfer must not depend on rename-replace of a claim path");
+    assert.equal(claimRenames, 0, "the transfer never attempted a rename on a claim path");
     const verify = JSON.parse(readLockRaw(dir));
     assert.equal(verify.pid, process.pid);
     // The dead claimant's file was never renamed or rewritten.
@@ -426,7 +429,7 @@ describe("dead-claimant fence transfer (Windows EPERM regression set)", () => {
     await releaseWorkspaceOwnership(dir);
   });
 
-  it("SIMULATED transient EPERM on the install rename is retried; a changed lock is never renamed over", async () => {
+  it("SIMULATED transient EPERM on the install rename is retried", async () => {
     // Simulated evidence: the same Windows transient can hit rename(next,
     // lock) while another process holds a snapshot link/handle on the lock
     // inode. The install may retry, but only while the lock still names the
@@ -436,7 +439,7 @@ describe("dead-claimant fence transfer (Windows EPERM regression set)", () => {
     writeLock(dir, stale);
     let denials = 0;
     const flakyInstall = async (oldPath: string, newPath: string): Promise<void> => {
-      if (newPath.endsWith(`/${LOCK}`) && denials < 2) {
+      if (basename(newPath) === LOCK && denials < 2) {
         denials += 1;
         const err = new Error("operation not permitted (simulated Windows EPERM)") as NodeJS.ErrnoException;
         err.code = "EPERM";
@@ -450,6 +453,48 @@ describe("dead-claimant fence transfer (Windows EPERM regression set)", () => {
     const verify = JSON.parse(readLockRaw(dir));
     assert.equal(verify.pid, process.pid);
     await releaseWorkspaceOwnership(dir);
+  });
+
+  it("a lock swapped to a live owner between install retries is never renamed over (fail closed)", async () => {
+    // Deterministic version of the Windows race: the first install attempt is
+    // denied EPERM and a DIFFERENT live owner lands its lock before our retry.
+    // The retry must re-verify the stale body, refuse to rename over the live
+    // owner's lock, and fail closed — leaving that lock and every claim file
+    // of this succession untouched.
+    const dir = mkdtempSync(join(tmp, "swapped-"));
+    const stale = deadBody(999_984);
+    writeLock(dir, stale);
+    const base = fenceName(stale);
+    const hash = base.split(".").pop() ?? "";
+    const deadClaimant = { ...deadBody(999_983), for: hash };
+    writeFileSync(join(dir, base), `${JSON.stringify(deadClaimant)}\n`);
+    // A genuinely live owner (this process, started after module boot).
+    const liveOwner: LockFileBody = { pid: process.pid, hostname: hostname(), startedAt: Date.now() };
+
+    let installAttempts = 0;
+    const denyThenSwap = async (oldPath: string, newPath: string): Promise<void> => {
+      assert.equal(basename(newPath), LOCK, "the only rename in the protocol is the install");
+      installAttempts += 1;
+      if (installAttempts === 1) {
+        writeFileSync(join(dir, LOCK), `${JSON.stringify(liveOwner)}\n`); // live owner lands mid-denial
+        const err = new Error("operation not permitted (simulated Windows EPERM)") as NodeJS.ErrnoException;
+        err.code = "EPERM";
+        throw err;
+      }
+      await rename(oldPath, newPath);
+    };
+    const result = await takeWorkspaceOwnership(dir, { rename: denyThenSwap });
+    assert.equal(result.kind, "held-elsewhere", "the succession moved to a live owner: fail closed");
+    assert.deepEqual(result.owner, liveOwner, "the refusal names the live owner");
+    assert.equal(installAttempts, 1, "no second rename was attempted over the changed lock");
+    assert.deepEqual(JSON.parse(readLockRaw(dir)), liveOwner, "the live owner's lock was never clobbered");
+    assert.deepEqual(
+      JSON.parse(readFileSync(join(dir, base), "utf8")),
+      deadClaimant,
+      "the dead claimant's fence file is untouched",
+    );
+    await releaseWorkspaceOwnership(dir); // must not remove the live owner's lock
+    assert.deepEqual(JSON.parse(readLockRaw(dir)), liveOwner, "release left the live owner's lock in place");
   });
 
   it("a second dead claimant advances the claim chain instead of renaming over the first fence", async () => {
