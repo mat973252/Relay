@@ -312,4 +312,53 @@ describe("effect transition evidence", () => {
       journal.close();
     }
   });
+
+  /**
+   * listHistory reads two tables. A writer on a separate connection that
+   * commits between those reads must not produce a row/event pair that
+   * disagrees (old row + new event, or new row without its event). The
+   * interleaving is deterministic: node:sqlite is synchronous, so any
+   * `await` inside listHistory is exactly the point where the writer runs.
+   */
+  for (const mode of ["unfiltered", "key-filtered"] as const) {
+    it(`listHistory (${mode}) returns a coherent row/event snapshot under an interleaved writer`, async () => {
+      const path = join(tmp, `snapshot-${mode}.db`);
+      const reader = await SqliteEffectJournal.open({ path });
+      const writer = await SqliteEffectJournal.open({ path });
+      try {
+        await writer.insertPrepared(prepared("s1", "snap/1", 1));
+        await writer.markSubmitted("s1", 2);
+
+        const pending = reader.listHistory(mode === "key-filtered" ? "snap/1" : undefined);
+        await writer.markConfirmed("s1", { remoteRef: "r-1", resultJson: undefined, at: 3, cause: "execute" });
+        await writer.insertPrepared(prepared("s2", "snap/2", 4));
+
+        const histories = await pending;
+        for (const h of histories) {
+          assert.equal(h.events.at(-1)?.toStatus, h.record.status, `row/event disagree for ${h.record.id}`);
+          assert.notEqual(h.coverage, "unavailable");
+        }
+        const s1 = histories.find((h) => h.record.id === "s1");
+        assert.ok(s1);
+        assert.equal(s1.record.status, "SUBMITTED");
+        assert.deepEqual(shape(s1.events), [
+          [undefined, "PREPARED", "prepare"],
+          ["PREPARED", "SUBMITTED", "submit"],
+        ]);
+        if (mode === "unfiltered") assert.equal(histories.some((h) => h.record.id === "s2"), false);
+
+        const after = await reader.listHistory(mode === "key-filtered" ? "snap/1" : undefined);
+        const s1After = after.find((h) => h.record.id === "s1");
+        assert.equal(s1After?.record.status, "CONFIRMED");
+        assert.equal(s1After?.events.at(-1)?.toStatus, "CONFIRMED");
+        if (mode === "unfiltered") {
+          const s2 = after.find((h) => h.record.id === "s2");
+          assert.equal(s2?.coverage, "observed");
+        }
+      } finally {
+        reader.close();
+        writer.close();
+      }
+    });
+  }
 });

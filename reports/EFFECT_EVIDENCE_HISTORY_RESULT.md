@@ -26,7 +26,11 @@ acceptance, not an AgentLens change, and not a Pi Run/Step/Recovery store.
   pass no cause are recorded as `unknown` (except `markSubmitted`, whose only
   transition is `submit`). Nothing infers a cause from timing or state.
 - Read-only surface: `EffectHistoryReader.listEvents(effectId?)` and
-  `listHistory(key?)` returning `{ record, events, coverage }` with coverage
+  `listHistory(key?)` returning `{ record, events, coverage }`. `listHistory`
+  reads rows and events inside one `BEGIN DEFERRED ... COMMIT` (WAL read
+  snapshot, no writer lock, no mutation), so a concurrent commit from another
+  connection can never yield an old row with a newer event or a new row
+  without its event. Coverage is
   `observed` (chain starts at the row's initial `PREPARED` insert), `partial`
   (row predates evidence but has later events), `unavailable` (no events).
 - Migration: `CREATE TABLE IF NOT EXISTS`; repeated open is safe; existing
@@ -63,20 +67,23 @@ Results, identical on Node 24.19.0 and Node 22.23.3:
 | epistemic      |   8   |  8   |  0   |
 | core           |  40   | 40   |  0   |
 | artifact-fs    |  12   | 12   |  0   |
-| storage-sqlite |  24   | 24   |  0   |
+| storage-sqlite |  26   | 26   |  0   |
 | cli            |  36   | 36   |  0   |
 | mcp            |  49   | 49   |  0   |
 | adapter-pi     |   7   |  7   |  0   |
-| **total**      | 176   | 176  |  0   |
+| **total**      | 178   | 178  |  0   |
 
 Targeted regression-first tests added (all included in the counts above):
 
-- `packages/storage-sqlite/test/history.test.ts` (7 tests): full chain,
+- `packages/storage-sqlite/test/history.test.ts` (9 tests): full chain,
   rejected transitions append nothing, `unknown` cause for unannotated callers,
   legacy DB (pre-existing `relay_effects` without events) reports
   `unavailable`/`partial` and is not backfilled, repeated open, `replaceAll`
   with and without events, execute vs reconcile attribution, terminal
-  re-entry dedup.
+  re-entry dedup, and (review fix) an interleaved writer on a second
+  connection committing between the row and event reads of `listHistory`,
+  unfiltered and key-filtered; the pair must be coherent. Verified to fail
+  against the pre-fix `listHistory` (2/2 failing) and pass after.
 - `packages/storage-sqlite/test/crash-matrix.test.ts` (extended): after every
   crash seam the event chain is checked; latest status equals the last event;
   no `execute` confirmation exists without a provider commit; no recovery
@@ -103,7 +110,13 @@ PASS  transition evidence: prepare, submit, reconcile-confirm (no execute-confir
 PASS  last committed event agrees with latest-state row
 ```
 
-Native Windows: not run in this stage. The above is Linux-only evidence; the
+Typecheck ordering note: on a fresh clone, `pnpm typecheck` fails with
+`packages/adapter-pi/test/deferred.test.ts: Cannot find module '@relay/cli/capsule'`
+until `@relay/cli` has been built once. Reproduced on `main` at
+`3c18c394a0795301e7bc0758934b8874dea4a333` in a clean worktree with no
+changes from this PR, so it is pre-existing and out of scope here.
+
+Native Windows: not run by this session. The above is Linux-only evidence; the
 Windows limits recorded in `INDEPENDENT_RELAY_GATE_REVIEW_2026-09-25.md`
 (path-separator assertion, POSIX `SIGKILL` in the demo) are unchanged.
 

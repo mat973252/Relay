@@ -176,6 +176,20 @@ export class SqliteEffectJournal implements EffectJournal, EffectHistoryReader {
   }
 
   /**
+   * Read-only snapshot: a deferred transaction takes no write lock, but in
+   * WAL every SELECT inside it sees the same committed state, so rows and
+   * events read together can never straddle a concurrent commit.
+   */
+  private snapshot<T>(work: () => T): T {
+    this.db.exec("BEGIN DEFERRED");
+    try {
+      return work();
+    } finally {
+      this.db.exec("COMMIT");
+    }
+  }
+
+  /**
    * Capsule import path: atomically replaces the whole journal content.
    * Events are installed verbatim (including seq) only when supplied and
    * only for records present in `records`; without events the imported rows
@@ -355,6 +369,10 @@ export class SqliteEffectJournal implements EffectJournal, EffectHistoryReader {
 
   /** Read-only: all committed transitions in append order, optionally for one effect id. */
   async listEvents(effectId?: string): Promise<EffectTransitionEvent[]> {
+    return this.readEvents(effectId);
+  }
+
+  private readEvents(effectId?: string): EffectTransitionEvent[] {
     const rows =
       effectId === undefined
         ? this.db.prepare("SELECT * FROM relay_effect_events ORDER BY seq").all()
@@ -362,15 +380,26 @@ export class SqliteEffectJournal implements EffectJournal, EffectHistoryReader {
     return (rows as unknown as EventRow[]).map(toEvent);
   }
 
+  private readRecords(key?: string): EffectRecord[] {
+    const rows =
+      key === undefined
+        ? this.db.prepare("SELECT * FROM relay_effects ORDER BY created_at, id").all()
+        : this.db.prepare("SELECT * FROM relay_effects WHERE key = ?").all(key);
+    return (rows as unknown as EffectRow[]).map(toRecord);
+  }
+
   /**
    * Read-only: latest-state row plus its observed transitions. Coverage is
    * derived from what exists, never inferred: `observed` when the chain
    * starts at the insert, `partial` when it starts mid-life (legacy row
    * transitioned after the event table existed), `unavailable` when empty.
+   * Rows and events come from one snapshot so the pair is always coherent.
    */
   async listHistory(key?: string): Promise<EffectHistory[]> {
-    const records = key === undefined ? await this.list() : [await this.getByKey(key)].filter((r) => r !== undefined);
-    const events = await this.listEvents();
+    const { records, events } = this.snapshot(() => ({
+      records: this.readRecords(key),
+      events: this.readEvents(),
+    }));
     const byEffect = new Map<string, EffectTransitionEvent[]>();
     for (const event of events) {
       const list = byEffect.get(event.effectId) ?? [];
@@ -396,7 +425,6 @@ export class SqliteEffectJournal implements EffectJournal, EffectHistoryReader {
   }
 
   async list(): Promise<EffectRecord[]> {
-    const rows = this.db.prepare("SELECT * FROM relay_effects ORDER BY created_at, id").all();
-    return (rows as unknown as EffectRow[]).map(toRecord);
+    return this.readRecords();
   }
 }
