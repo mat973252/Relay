@@ -241,6 +241,11 @@ describe("status contract config validation", () => {
         { completeStatuses: ["complete", "failed"], notExecutedStatuses: ["failed"] },
         /overlap/i,
       ],
+      [
+        "overlap-via-default-complete",
+        { notExecutedStatuses: ["complete"] },
+        /overlap/i,
+      ],
     ];
     for (const [label, extraReconcile, pattern] of badContracts) {
       const workspace = makeWorkspace(tmp, `bad-${label}`);
@@ -253,6 +258,22 @@ describe("status contract config validation", () => {
       });
       assert.equal(result.status, 78, `${label}: expected config refusal, stderr: ${result.stderr}`);
       assert.match(result.stderr, pattern, label);
+    }
+  });
+
+  it("ordinary defaults and non-overlapping lists still load", { timeout: 60_000 }, async () => {
+    const provider = await startPendingProvider();
+    const workspace = makeWorkspace(tmp, "goodcontract");
+    writeStatusFieldActions(workspace, provider.baseUrl, { notExecutedStatuses: ["failed"] });
+    const client = await connectClient(workspace); // initialize succeeds => config loaded
+    try {
+      const res = await client.call("relay_list_unresolved", {});
+      assert.equal(res.isError, false, res.text);
+      assert.match(res.text, /no unresolved operations/);
+    } finally {
+      client.kill();
+      await client.exit;
+      await provider.stop();
     }
   });
 });

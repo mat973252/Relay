@@ -198,9 +198,11 @@ function validateAction(raw: unknown, file: string): ConfiguredAction {
     }
   }
   {
-    const completed = statusLists.get("completeStatuses");
+    // Overlap is checked against the EFFECTIVE complete list — the default
+    // ["complete"] applies even when completeStatuses is not configured.
+    const completed = statusLists.get("completeStatuses") ?? ["complete"];
     const notExecuted = statusLists.get("notExecutedStatuses");
-    const overlap = completed?.filter((s) => notExecuted?.includes(s)) ?? [];
+    const overlap = completed.filter((s) => notExecuted?.includes(s));
     if (overlap.length > 0) {
       throw new ActionsConfigError(
         `${file}: action "${a.id}" reconcile.completeStatuses and notExecutedStatuses overlap (${overlap.join(", ")}) — a status cannot prove both execution and non-execution`,
