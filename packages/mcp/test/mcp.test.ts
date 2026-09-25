@@ -6,104 +6,20 @@
  */
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { createInterface } from "node:readline";
+import { mkdtempSync, rmSync } from "node:fs";
 import { after, describe, it } from "node:test";
 import { startMiniProvider } from "./fixtures/mini-provider.js";
-import { SqliteEffectJournal } from "@relay/storage-sqlite";
+import {
+  connectClient,
+  journalStatus,
+  makeTempRoot,
+  makeWorkspace,
+  writeActions,
+  MAIN,
+} from "./helpers.js";
 
-const MAIN = fileURLToPath(new URL("../src/main.js", import.meta.url));
-const tmp = mkdtempSync(join(tmpdir(), "relay-mcp-"));
+const tmp = makeTempRoot("relay-mcp-");
 after(() => rmSync(tmp, { recursive: true, force: true }));
-
-interface McpClient {
-  call: (name: string, args: Record<string, unknown>) => Promise<{ isError?: boolean; text: string }>;
-  kill: () => void;
-  exit: Promise<{ status: number | null; signal: string | null }>;
-}
-
-async function connectClient(workspace: string): Promise<McpClient> {
-  const child = spawn(process.execPath, [MAIN, "--workspace", workspace], {
-    stdio: ["pipe", "pipe", "inherit"],
-  });
-  const rl = createInterface({ input: child.stdout });
-  const pending = new Map<number, (value: { isError?: boolean; text: string }) => void>();
-  const exit = new Promise<{ status: number | null; signal: string | null }>((resolve) => {
-    child.on("close", (status: number | null, signal: string | null) => resolve({ status, signal }));
-  });
-  rl.on("line", (line) => {
-    if (line.trim().length === 0) return;
-    try {
-      const msg = JSON.parse(line) as { id?: number; result?: { content?: { text?: string }[]; isError?: boolean } };
-      if (typeof msg.id === "number" && pending.has(msg.id)) {
-        const resolve = pending.get(msg.id);
-        pending.delete(msg.id);
-        resolve?.({
-          isError: msg.result?.isError ?? false,
-          text: msg.result?.content?.map((c) => c.text ?? "").join("") ?? "",
-        });
-      }
-    } catch {
-      // ignore non-JSON noise
-    }
-  });
-  const send = (id: number, method: string, params?: Record<string, unknown>) => {
-    child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
-  };
-  const request = (id: number, method: string, params?: Record<string, unknown>) =>
-    new Promise<{ isError?: boolean; text: string }>((resolve) => {
-      pending.set(id, resolve);
-      send(id, method, params);
-      setTimeout(() => {
-        if (pending.delete(id)) resolve({ isError: true, text: `timeout waiting for ${method} #${id}` });
-      }, 20_000);
-    });
-
-  const init = await request(1, "initialize", { protocolVersion: "2024-11-05", capabilities: {} });
-  if (init.isError) throw new Error(`initialize failed: ${init.text}`);
-  child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
-
-  let nextId = 2;
-  return {
-    call: (name, args) => request(nextId++, "tools/call", { name, arguments: args }),
-    kill: () => child.kill("SIGKILL"),
-    exit,
-  };
-}
-
-function writeActions(workspace: string, baseUrl: string): void {
-  mkdirSync(join(workspace, ".relay"), { recursive: true });
-  writeFileSync(
-    join(workspace, ".relay", "mcp-actions.json"),
-    JSON.stringify(
-      {
-        schema: "relay.mcp-actions/1",
-        actions: [
-          {
-            id: "counter-increment",
-            label: "Increment the demo counter (non-replayable)",
-            http: { url: `${baseUrl}/increment?operationId={operationId}`, method: "POST" },
-            reconcile: { url: `${baseUrl}/effects/{operationId}`, shape: "found-flag" },
-          },
-        ],
-      },
-      null,
-      2,
-    ),
-  );
-}
-
-async function journalStatus(workspace: string, key: string): Promise<string | undefined> {
-  const journal = await SqliteEffectJournal.open({ path: join(workspace, ".relay", "storage.db") });
-  try {
-    return (await journal.getByKey(key))?.status;
-  } finally {
-    journal.close();
-  }
-}
 
 const OP = "demo-op-1";
 const KEY = "counter-increment:demo-op-1";
@@ -111,7 +27,7 @@ const KEY = "counter-increment:demo-op-1";
 describe("relay-mcp server", () => {
   it("handshakes, lists effect tools for the owner, and executes exactly once per operation id", async () => {
     const provider = await startMiniProvider();
-    const workspace = mkdtempSync(join(tmp, "basic-"));
+    const workspace = makeWorkspace(tmp, "basic-");
     writeActions(workspace, provider.baseUrl);
     const client = await connectClient(workspace);
     try {
@@ -139,8 +55,8 @@ describe("relay-mcp server", () => {
   });
 
   it("dies after the remote commit, restarts, lists the unresolved id, reconciles read-only: counter stays 1", { timeout: 90_000 }, async () => {
-    const provider = await startMiniProvider(5_000); // hold the response
-    const workspace = mkdtempSync(join(tmp, "crash-"));
+    const provider = await startMiniProvider({ holdMs: 5_000 }); // hold the response
+    const workspace = makeWorkspace(tmp, "crash-");
     writeActions(workspace, provider.baseUrl);
     const clientA = await connectClient(workspace);
     const submitted = clientA
@@ -184,7 +100,7 @@ describe("relay-mcp server", () => {
 
   it("second live server fails closed; after the owner dies, a new server takes over", { timeout: 90_000 }, async () => {
     const provider = await startMiniProvider();
-    const workspace = mkdtempSync(join(tmp, "dual-"));
+    const workspace = makeWorkspace(tmp, "dual-");
     writeActions(workspace, provider.baseUrl);
     const owner = await connectClient(workspace);
     try {
@@ -223,7 +139,7 @@ describe("relay-mcp server", () => {
   });
 
   it("refuses to start without an actions config (exit 78)", async () => {
-    const workspace = mkdtempSync(join(tmp, "noconfig-"));
+    const workspace = makeWorkspace(tmp, "noconfig-");
     const result = await new Promise<{ status: number | null }>((resolve) => {
       const child = spawn(process.execPath, [MAIN, "--workspace", workspace], { stdio: "ignore" });
       child.on("close", (status) => resolve({ status }));
@@ -233,7 +149,7 @@ describe("relay-mcp server", () => {
 
   it("rejects unknown actions and empty operation ids", async () => {
     const provider = await startMiniProvider();
-    const workspace = mkdtempSync(join(tmp, "args-"));
+    const workspace = makeWorkspace(tmp, "args-");
     writeActions(workspace, provider.baseUrl);
     const client = await connectClient(workspace);
     try {

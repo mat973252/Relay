@@ -15,6 +15,7 @@ interface EffectRow {
   key: string;
   kind: string;
   request_hash: string;
+  intent_json: string | null;
   replay: string;
   status: string;
   remote_ref: string | null;
@@ -50,6 +51,7 @@ function toRecord(row: EffectRow): EffectRecord {
     key: row.key,
     kind: row.kind,
     requestHash: row.request_hash,
+    intentJson: row.intent_json ?? undefined,
     replay: row.replay as EffectRecord["replay"],
     status: row.status as EffectRecord["status"],
     remoteRef: row.remote_ref ?? undefined,
@@ -81,6 +83,12 @@ export class SqliteEffectJournal implements EffectJournal {
     db.exec("PRAGMA journal_mode = WAL;");
     db.exec("PRAGMA synchronous = FULL;");
     db.exec(SCHEMA);
+    // Migration for journals created before intent recovery metadata existed.
+    try {
+      db.exec("ALTER TABLE relay_effects ADD COLUMN intent_json TEXT");
+    } catch {
+      // column already present
+    }
     return new SqliteEffectJournal(db);
   }
 
@@ -97,15 +105,16 @@ export class SqliteEffectJournal implements EffectJournal {
         this.db
           .prepare(
             `INSERT INTO relay_effects
-               (id, key, kind, request_hash, replay, status, remote_ref, result_json, reason,
+               (id, key, kind, request_hash, intent_json, replay, status, remote_ref, result_json, reason,
                 created_at, submitted_at, settled_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .run(
             record.id,
             record.key,
             record.kind,
             record.requestHash,
+            record.intentJson ?? null,
             record.replay,
             record.status,
             record.remoteRef ?? null,
@@ -128,11 +137,11 @@ export class SqliteEffectJournal implements EffectJournal {
     this.db
       .prepare(
         `INSERT INTO relay_effects
-           (id, key, kind, request_hash, replay, status, remote_ref, result_json, reason,
+           (id, key, kind, request_hash, intent_json, replay, status, remote_ref, result_json, reason,
             created_at, submitted_at, settled_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, 'PREPARED', NULL, NULL, NULL, ?, NULL, NULL, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, 'PREPARED', NULL, NULL, NULL, ?, NULL, NULL, ?)`,
       )
-      .run(record.id, record.key, record.kind, record.requestHash, record.replay, record.createdAt, record.updatedAt);
+      .run(record.id, record.key, record.kind, record.requestHash, record.intentJson ?? null, record.replay, record.createdAt, record.updatedAt);
   }
 
   async markSubmitted(id: string, at: number): Promise<void> {

@@ -4,7 +4,7 @@ Status: **Steps 1–5 complete, stopped for review** per `tasks/NEXT_ITERATION_P
 
 ## Implementation
 
-1. **Review baseline closed** (commit `3f18e2f` message aside — see git log): the three uncommitted review files landed as their own commit — overwrite protection now covers any `.relay` state (artifacts/contract without effects), parked-state restore happens before the overwrite refusal, the secret claim was narrowed, and the Windows/root `chmod` skip is explicit. Committed only after `corepack pnpm check` passed.
+1. **Review baseline closed** (commit `3ade92d`): the three uncommitted review files landed as their own commit — overwrite protection now covers any `.relay` state (artifacts/contract without effects), parked-state restore happens before the overwrite refusal, the secret claim was narrowed, and the Windows/root `chmod` skip is explicit. Committed only after `corepack pnpm check` passed.
 2. **Host-independent demo** — `examples/crash-demo.mjs`: self-contained local HTTP counter (commits BEFORE answering, holds the response), real child-process SIGKILL after the remote commit, restart with the same semantic operation id, read-only reconciliation, four hard assertions (counter === 1, journal CONFIRMED, reconciled=true, precondition that death happened after commit). Runs on Node alone. README links it with the exact command and the honest guarantee statement.
 3. **MCP vertical slice** — new package `@relay/mcp` (`packages/mcp`):
    - stdio JSON-RPC 2.0 MCP server (`initialize` / `tools/list` / `tools/call`), no SDK dependency;
@@ -36,12 +36,12 @@ One shared workspace (`/mnt/d/relay-xhost` = `D:\relay-xhost`), one server comma
 
 Also observed live, unplanned: when the Claude Code session's MCP process was still holding the workspace, **Codex's server instance correctly failed closed** ("another MCP process owns this workspace") and executed nothing (counter 0) — the single-writer boundary demonstrated across hosts by accident. A direct fetch failure mid-call correctly surfaced as `UNKNOWN` ("do not resubmit") rather than a retry.
 
-Practical notes recorded for operators: Windows hosts cannot resolve WSL-created pnpm symlinks, so the verified host configs spawn the server through `wsl.exe` (documented in both host READMEs); Codex needs `--approve-for-me` (MCP calls are approval-gated by default — the earlier "user cancelled MCP tool call" failures were the approval policy, not the server).
+Practical notes recorded for operators (wording corrected in the safety-review pass): the TRACKED host entries document native `node` commands only — `hosts/claude-code/relay-effect-guard/install.mjs` generates a machine-local, untracked `.mcp.json` (absolute paths cannot travel in a plugin template), and the Codex README's `config.toml` snippet spawns `node` directly. The `wsl.exe` bridging used during the cross-host experiment (Windows host CLI spawning the WSL-built server through `wsl.exe`, because Windows node cannot resolve WSL-created pnpm symlinks) was a property of those ad-hoc verification configs, not of the tracked files. Codex additionally needed `--approve-for-me` on 0.147.0 (MCP calls are approval-gated by default — the earlier "user cancelled MCP tool call" failures were the approval policy, not the server).
 
 ## Host entries
 
-- `hosts/claude-code/relay-effect-guard/`: plugin layout (`.claude-plugin/plugin.json`, generated `.mcp.json`, `skills/relay-safe-actions/SKILL.md`), `install.mjs` generator, README with the exact verified headless command and honest coverage statement.
-- `hosts/codex/relay-effect-guard/`: `config-snippet` procedure for a clean `CODEX_HOME` profile, same SKILL guidance, README documenting the verified command incl. `--approve-for-me` and the wsl.exe bridging reason.
+- `hosts/claude-code/relay-effect-guard/`: plugin layout (`.claude-plugin/plugin.json`, machine-local generated `.mcp.json` — untracked, produced by `install.mjs`, `skills/relay-safe-actions/SKILL.md`), `install.mjs` generator, README with the exact verified headless command and honest coverage statement.
+- `hosts/codex/relay-effect-guard/`: `config-snippet` procedure for a clean `CODEX_HOME` profile (native `node` command), same SKILL guidance, README documenting the verified command; the version-specific approval flag (`--approve-for-me` on 0.147.0) and the ad-hoc `wsl.exe` bridging live in this report's evidence, not in the tracked entry.
 - Both state explicitly: protection covers only actions executed through the relay tools; raw shell/HTTP, built-in tools, and other MCP servers are bypasses, and installing a plugin intercepts nothing.
 - Pi remains the native reference adapter (unchanged this iteration).
 

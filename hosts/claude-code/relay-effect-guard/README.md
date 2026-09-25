@@ -11,8 +11,9 @@ destinations and credentials never come from prompt text.
 node hosts/claude-code/relay-effect-guard/install.mjs [workspace]
 ```
 
-This generates `.mcp.json` with absolute paths for THIS machine. Verify the
-exact server command headlessly before installing anything:
+This generates `.mcp.json` with absolute paths for THIS machine (the file is
+machine-local and untracked; only `install.mjs` and the docs are tracked).
+Verify the exact server command headlessly before installing anything:
 
 ```bash
 claude -p "call relay_list_unresolved and report the JSON" \
@@ -33,3 +34,8 @@ marketplace mechanism after local verification passes.
   nothing; the safe path is the skill + tool contract above.
 - One live Relay MCP process per workspace: a second one fails closed until
   the first exits (single-writer lock, recoverable after process death).
+- Cross-OS note (verified): a Windows-native Claude Code CLI cannot spawn
+  the WSL-built server directly (Windows node cannot resolve WSL pnpm
+  symlinks); point `.mcp.json` at `wsl.exe -e node <path>` instead. The
+  generated config uses whatever node runs `install.mjs` — regenerate it in
+  the environment the CLI will spawn.

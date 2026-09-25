@@ -38,6 +38,12 @@ export interface EffectRecord {
   kind: string;
   /** SHA-256 of the canonicalized request; equal requests hash equally. */
   requestHash: string;
+  /**
+   * Optional serialized non-secret intent description (recovery metadata so
+   * a fresh session can recognize the operation). NOT identity: excluded
+   * from requestHash on purpose — re-entry must not depend on prose.
+   */
+  intentJson?: string | undefined;
   replay: ReplayPolicy;
   status: EffectStatus;
   /** Provider-side reference for the committed effect, when known. */
@@ -141,6 +147,8 @@ export interface RunEffectInput {
   kind: string;
   /** JSON-serializable request description; hashed for the record. */
   request: unknown;
+  /** Non-secret intent description stored on the record (not hashed). */
+  intent?: string | undefined;
   replay: ReplayPolicy;
   /** Performs the unsafe external operation. Must throw AmbiguousEffectError on uncertainty. */
   execute: (ctx: EffectExecuteContext) => Promise<unknown>;
@@ -267,6 +275,7 @@ export async function runEffect(input: RunEffectInput): Promise<EffectOutcome> {
       key: input.key,
       kind: input.kind,
       requestHash: hashRequest(input.request),
+      intentJson: input.intent,
       replay: input.replay,
       status: "PREPARED",
       remoteRef: undefined,

@@ -18,12 +18,13 @@ import { AmbiguousEffectError, runEffect, type EffectRecord } from "@relay/core"
 import { SqliteEffectJournal } from "@relay/storage-sqlite";
 import { createInterface } from "node:readline";
 import { join } from "node:path";
-import { loadActions, type ActionsFile, type ConfiguredAction } from "./actions.js";
+import { loadActions, actionFingerprint, DEFAULT_HTTP_TIMEOUT_MS, type ActionsFile, type ConfiguredAction } from "./actions.js";
 import { takeWorkspaceOwnership, releaseWorkspaceOwnership } from "./lock.js";
 import { envHeaderValue } from "./env.js";
 
 const PROTOCOL_VERSION = "2024-11-05";
 const SERVER_INFO = { name: "relay", version: "0.1.0" };
+const MAX_INTENT_LENGTH = 500;
 
 export interface RelayMcpServerOptions {
   /** Workspace directory (journal at <workspace>/.relay/storage.db). */
@@ -54,6 +55,8 @@ export class RelayMcpServer {
   private readonly actions: ActionsFile;
   private readonly relayDir: string;
   private ownership: { kind: "acquired" | "held-elsewhere"; owner: { pid: number; hostname: string } | undefined } | undefined;
+  /** Per-journal-key promise chain: same-key tool calls linearize (FIFO). */
+  private readonly keyQueue = new Map<string, Promise<unknown>>();
 
   private constructor(
     private readonly options: RelayMcpServerOptions,
@@ -93,6 +96,12 @@ export class RelayMcpServer {
           properties: {
             actionId: { type: "string", enum: this.actions.actions.map((a) => a.id) },
             operationId: { type: "string", minLength: 1, description: "Stable, domain-specific operation id (survives sessions)" },
+            intent: {
+              type: "string",
+              maxLength: 500,
+              description:
+                "Short non-secret description of the intended effect, listed by relay_list_unresolved so a fresh session can recognize this operation. Never put credentials here.",
+            },
           },
           required: ["actionId", "operationId"],
         },
@@ -100,7 +109,8 @@ export class RelayMcpServer {
       {
         name: "relay_list_unresolved",
         description:
-          "List effect operations in PREPARED/SUBMITTED/UNKNOWN state for this workspace. " +
+          "List effect operations in PREPARED/SUBMITTED/UNKNOWN state for this workspace, " +
+          "with actionId, operationId, status, and the recorded non-secret intent. " +
           "Call this FIRST when (re)starting work, and reuse the listed operation ids instead " +
           "of creating new ones.",
         inputSchema: { type: "object", properties: {} },
@@ -110,7 +120,9 @@ export class RelayMcpServer {
         description:
           "Read-only reconciliation of an ambiguous (SUBMITTED/UNKNOWN) operation against the " +
           "configured provider. Confirms CONFIRMED when the remote side reports the effect; " +
-          "reports FAILED when the provider proves it never executed.",
+          "reports FAILED only when the provider proves it never executed. Never creates a " +
+          "journal record: absent keys return an explicit absent result and PREPARED records " +
+          "report that execution never began (continue with relay_submit_action).",
         inputSchema: {
           type: "object",
           properties: {
@@ -232,19 +244,57 @@ export class RelayMcpServer {
     return raw;
   }
 
+  /** Non-secret intent metadata (recovery aid); never part of request identity. */
+  private static intentFor(raw: unknown): string | undefined {
+    if (raw === undefined || raw === null) return undefined;
+    if (typeof raw !== "string" || raw.length === 0 || raw.length > MAX_INTENT_LENGTH) {
+      throw new Error(`intent must be a non-empty string of at most ${String(MAX_INTENT_LENGTH)} characters`);
+    }
+    return raw;
+  }
+
+  /**
+   * Linearize same-key work: a second call for the same journal key waits
+   * for the previous one to settle. A not-found observation can therefore
+   * never race an in-flight execution into a false FAILED.
+   */
+  private enqueue<T>(key: string, run: () => Promise<T>): Promise<T> {
+    const prev = this.keyQueue.get(key) ?? Promise.resolve();
+    const next = prev.then(run, run); // run regardless of the previous outcome
+    const tail = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.keyQueue.set(key, tail);
+    void tail.then(() => {
+      if (this.keyQueue.get(key) === tail) this.keyQueue.delete(key);
+    });
+    return next;
+  }
+
+  /** Request identity: action + operation + config semantics. Intent excluded. */
+  private static requestFor(action: ConfiguredAction, operationId: string): Record<string, string> {
+    return { actionId: action.id, operationId, config: actionFingerprint(action) };
+  }
+
   private async submit(args: Record<string, unknown>): Promise<{ content: { type: string; text: string }[]; isError: boolean }> {
     const action = this.actionFor(args.actionId);
     const operationId = RelayMcpServer.operationIdFor(args.operationId);
+    const intent = RelayMcpServer.intentFor(args.intent);
+    const key = `${action.id}:${operationId}`;
     const journal = await this.journal;
-    const outcome = await runEffect({
-      key: `${action.id}:${operationId}`,
-      kind: `mcp:${action.id}`,
-      request: { actionId: action.id, operationId },
-      replay: "never",
-      journal,
-      execute: async () => RelayMcpServer.executeAction(action, operationId),
-      reconcile: async (record) => RelayMcpServer.reconcileAction(action, record),
-    });
+    const outcome = await this.enqueue(key, () =>
+      runEffect({
+        key,
+        kind: `mcp:${action.id}`,
+        request: RelayMcpServer.requestFor(action, operationId),
+        intent,
+        replay: "never",
+        journal,
+        execute: async () => RelayMcpServer.executeAction(action, operationId),
+        reconcile: async (record) => RelayMcpServer.reconcileAction(action, record),
+      }),
+    );
     const text =
       outcome.status === "unknown"
         ? `${JSON.stringify(outcome)}\nOUTCOME AMBIGUOUS — do NOT resubmit this operationId. Call relay_reconcile_operation { actionId: "${action.id}", operationId: "${operationId}" } and act on its result.`
@@ -262,20 +312,35 @@ export class RelayMcpServer {
       headers[header] = value;
     }
     const url = action.http.url.replace("{operationId}", encodeURIComponent(operationId));
+    const timeoutMs = action.http.timeoutMs ?? DEFAULT_HTTP_TIMEOUT_MS;
+    const rejectStatuses = action.http.rejectStatuses ?? [];
+    let res: Response;
     try {
-      const res = await fetch(url, { method: action.http.method, headers });
-      if (!res.ok) {
-        // Definitive rejection from the provider (before commit): a failure.
-        if (res.status >= 400 && res.status < 500) {
-          throw new Error(`provider rejected ${action.id}: HTTP ${String(res.status)}`);
-        }
-        throw new AmbiguousEffectError(`provider HTTP ${String(res.status)}`);
+      res = await fetch(url, { method: action.http.method, headers, signal: AbortSignal.timeout(timeoutMs) });
+    } catch (err) {
+      // No definitive answer (network error, timeout, abort): the effect may
+      // or may not have been committed remotely. UNKNOWN, never FAILED.
+      throw new AmbiguousEffectError(
+        `request for ${action.id} gave no definitive answer within ${String(timeoutMs)}ms: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    if (!res.ok) {
+      if (rejectStatuses.includes(res.status)) {
+        // The operator's provider contract proves this status is a
+        // pre-commit rejection: a definitive failure.
+        throw new Error(`provider rejected ${action.id}: HTTP ${String(res.status)} (configured pre-commit rejection)`);
       }
+      // Providers may commit and still answer with an error (409/408
+      // included); proxies may emit ambiguous statuses. Default UNKNOWN.
+      throw new AmbiguousEffectError(
+        `provider answered HTTP ${String(res.status)} for ${action.id}: not provably a pre-commit rejection`,
+      );
+    }
+    try {
       return (await res.json()) as unknown;
     } catch (err) {
-      if (err instanceof AmbiguousEffectError || err instanceof Error && err.message.startsWith("provider rejected")) throw err;
       throw new AmbiguousEffectError(
-        `request for ${action.id} failed before a definitive answer: ${err instanceof Error ? err.message : String(err)}`,
+        `provider 2xx body for ${action.id} was not parseable: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
   }
@@ -308,24 +373,61 @@ export class RelayMcpServer {
     const text =
       unresolved.length === 0
         ? "no unresolved operations"
-        : JSON.stringify(unresolved.map((r) => ({ key: r.key, status: r.status, updatedAt: r.updatedAt })));
+        : JSON.stringify(
+            unresolved.map((r) => {
+              // key is `${actionId}:${operationId}` and action ids are slugs
+              // without colons, so the FIRST colon splits them exactly.
+              const split = r.key.indexOf(":");
+              const actionId = split === -1 ? r.key : r.key.slice(0, split);
+              const operationId = split === -1 ? "" : r.key.slice(split + 1);
+              const entry: Record<string, unknown> = {
+                key: r.key,
+                actionId,
+                operationId,
+                status: r.status,
+                updatedAt: r.updatedAt,
+              };
+              if (r.intentJson !== undefined) entry.intent = r.intentJson;
+              return entry;
+            }),
+          );
     return { content: [{ type: "text", text }], isError: false };
   }
 
   private async reconcile(args: Record<string, unknown>): Promise<{ content: { type: string; text: string }[]; isError: boolean }> {
     const action = this.actionFor(args.actionId);
     const operationId = RelayMcpServer.operationIdFor(args.operationId);
+    const key = `${action.id}:${operationId}`;
     const journal = await this.journal;
-    const outcome = await runEffect({
-      key: `${action.id}:${operationId}`,
-      kind: `mcp:${action.id}`,
-      request: { actionId: action.id, operationId },
-      replay: "never",
-      journal,
-      execute: async () => {
-        throw new Error("reconcile-only call: operation already has a journal record; refusing to execute");
-      },
-      reconcile: async (record) => RelayMcpServer.reconcileAction(action, record),
+    const outcome = await this.enqueue(key, async () => {
+      // Read-only pre-check: reconciliation must never CREATE journal state
+      // and never touch the provider for keys with nothing in flight.
+      const existing = await journal.getByKey(key);
+      if (existing === undefined) {
+        return {
+          status: "absent" as const,
+          key,
+          note: "no journal record exists for this operation — nothing was ever submitted through Relay; submit it first if the effect is still intended",
+        };
+      }
+      if (existing.status === "PREPARED") {
+        return {
+          status: "prepared" as const,
+          key,
+          note: "execution never began (no remote request was made for this record); continue with relay_submit_action using the SAME operationId",
+        };
+      }
+      return runEffect({
+        key,
+        kind: `mcp:${action.id}`,
+        request: RelayMcpServer.requestFor(action, operationId),
+        replay: "never",
+        journal,
+        execute: async () => {
+          throw new Error("reconcile-only call reached execute on an existing record; refusing");
+        },
+        reconcile: async (record) => RelayMcpServer.reconcileAction(action, record),
+      });
     });
     return { content: [{ type: "text", text: JSON.stringify(outcome) }], isError: outcome.status === "failed" };
   }

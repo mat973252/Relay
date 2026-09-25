@@ -15,13 +15,25 @@ $codexHome = "$env:TEMP\relay-codex-home"
 New-Item -ItemType Directory -Force $codexHome | Out-Null
 @'
 [mcp_servers.relay]
-command = "node"
-args = ["D:\\code\\aiproject\\Relay\\packages\\mcp\\dist\\src\\main.js", "--workspace", "D:\\code\\aiproject\\Relay"]
-'@ | Set-Content "$codexHome\\config.toml"
-Copy-Item "$env:USERPROFILE\\.codex\\auth.json" "$codexHome\\auth.json" -ErrorAction Stop
+command = "wsl.exe"
+args = ["-e", "node", "/mnt/d/code/aiproject/Relay/packages/mcp/dist/src/main.js", "--workspace", "/mnt/d/relay-workspace"]
+'@ | Set-Content "$codexHome\config.toml"
+Copy-Item "$env:USERPROFILE\.codex\auth.json" "$codexHome\auth.json" -ErrorAction Stop
 $env:CODEX_HOME = $codexHome
-codex exec "call relay_list_unresolved and report the JSON"
+codex exec --skip-git-repo-check --approve-for-me -
 ```
+
+Notes from the verified run (Codex 0.156.1 on Windows):
+
+- `--approve-for-me` is REQUIRED for MCP calls in `exec` mode — without it
+  every tool call is blocked with "approval policy is never" and nothing
+  executes.
+- The `wsl.exe` bridge is the verified shape for a Windows Codex + WSL-built
+  workspace (Windows node cannot resolve WSL pnpm symlinks); the server and
+  the provider then share the WSL network namespace. A same-OS setup uses
+  `command = "node"` with the plain server path.
+- The prompt goes via stdin (`-`) — multi-word prompts passed as one
+  `cmd.exe` argument get split.
 
 3. Read `SKILL.md` in this directory into the agent's instructions (or add it
    to the project AGENTS.md) so retries reuse operation ids.

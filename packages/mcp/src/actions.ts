@@ -5,9 +5,17 @@
  * and secret-header reference comes from a local, operator-owned config file
  * (`.relay/mcp-actions.json`). This is deliberately NOT a generic
  * arbitrary-URL proxy.
+ *
+ * Safety-review additions: both endpoints must literally bind
+ * `{operationId}` (otherwise exactly-once cannot be anchored to the
+ * operation id), HTTP outcomes default to UNKNOWN and only statuses the
+ * operator explicitly lists as proven pre-commit rejections may settle
+ * FAILED, and submit requests carry a bounded timeout.
  */
 import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
+import { stableStringify } from "@relay/core";
 
 export interface HttpActionEndpoint {
   url: string;
@@ -16,6 +24,15 @@ export interface HttpActionEndpoint {
   headers?: Record<string, string>;
   /** headerName -> env var NAME (never a value). */
   secretHeaders?: Record<string, string>;
+  /** Upper bound on the submit request; timeouts resolve UNKNOWN, never FAILED. */
+  timeoutMs?: number;
+  /**
+   * HTTP statuses the operator's provider contract PROVES are pre-commit
+   * rejections (definitive FAILED). Everything else defaults to UNKNOWN.
+   * Note: commit-then-error providers exist (409/408 included) — list a
+   * status here only if the contract rules out post-commit responses.
+   */
+  rejectStatuses?: number[];
 }
 
 export interface ReconcileEndpoint {
@@ -35,6 +52,34 @@ export interface ConfiguredAction {
   description?: string | undefined;
   http: HttpActionEndpoint;
   reconcile: ReconcileEndpoint;
+}
+
+/** Default submit timeout: bounded, but generous for slow providers. */
+export const DEFAULT_HTTP_TIMEOUT_MS = 30_000;
+
+/**
+ * Fingerprint of everything in an action config that changes the REMOTE
+ * MEANING of a submission. Bound into the journal request identity so a
+ * config change refuses to reuse an existing operation id for a different
+ * remote effect (fail closed instead of silently re-targeting).
+ * Hash only: secret env NAMES are config, secret VALUES never appear.
+ */
+export function actionFingerprint(action: ConfiguredAction): string {
+  return createHash("sha256")
+    .update(
+      stableStringify({
+        id: action.id,
+        http: {
+          url: action.http.url,
+          method: action.http.method,
+          headers: action.http.headers ?? {},
+          secretHeaders: action.http.secretHeaders ?? {},
+        },
+        reconcile: { url: action.reconcile.url, shape: action.reconcile.shape },
+      }),
+      "utf8",
+    )
+    .digest("hex");
 }
 
 export interface ActionsFile {
@@ -68,6 +113,29 @@ function validateAction(raw: unknown, file: string): ConfiguredAction {
   ) {
     throw new ActionsConfigError(`${file}: action "${a.id}" needs http.url and a POST/PUT/PATCH method`);
   }
+  if (!http.url.includes("{operationId}")) {
+    throw new ActionsConfigError(
+      `${file}: action "${a.id}" http.url must bind {operationId} — an endpoint that ignores the operation id cannot anchor exactly-once`,
+    );
+  }
+  if (
+    http.timeoutMs !== undefined &&
+    (typeof http.timeoutMs !== "number" || !Number.isInteger(http.timeoutMs) || http.timeoutMs <= 0 || http.timeoutMs > 600_000)
+  ) {
+    throw new ActionsConfigError(`${file}: action "${a.id}" http.timeoutMs must be a positive integer of at most 600000`);
+  }
+  if (http.rejectStatuses !== undefined) {
+    if (!Array.isArray(http.rejectStatuses) || http.rejectStatuses.length === 0) {
+      throw new ActionsConfigError(`${file}: action "${a.id}" http.rejectStatuses must be a non-empty list when present`);
+    }
+    for (const status of http.rejectStatuses) {
+      if (typeof status !== "number" || !Number.isInteger(status) || status < 400 || status > 499) {
+        throw new ActionsConfigError(
+          `${file}: action "${a.id}" http.rejectStatuses entries must be integers in 400..499 (client-side statuses only; post-commit ambiguity stays UNKNOWN)`,
+        );
+      }
+    }
+  }
   const rec = a.reconcile as Record<string, unknown> | undefined;
   if (
     typeof rec !== "object" ||
@@ -77,6 +145,11 @@ function validateAction(raw: unknown, file: string): ConfiguredAction {
     (rec.shape !== "found-flag" && rec.shape !== "status-field")
   ) {
     throw new ActionsConfigError(`${file}: action "${a.id}" needs a read-only reconcile { url, shape }`);
+  }
+  if (!rec.url.includes("{operationId}")) {
+    throw new ActionsConfigError(
+      `${file}: action "${a.id}" reconcile.url must bind {operationId} — reconciliation must observe THIS operation, not some aggregate`,
+    );
   }
   for (const [header, envName] of Object.entries((http.secretHeaders as Record<string, unknown>) ?? {})) {
     if (typeof envName !== "string" || envName.length === 0) {
