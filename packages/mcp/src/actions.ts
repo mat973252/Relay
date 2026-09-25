@@ -41,9 +41,27 @@ export interface ReconcileEndpoint {
   /**
    * How to interpret a 200 response body:
    *  - "found-flag": body.found === true  => executed remotely
-   *  - "status-field": body.status === "complete" => executed remotely
+   *  - "status-field": body.status ∈ completeStatuses => executed remotely,
+   *    body.status ∈ notExecutedStatuses => PROVEN non-execution (FAILED).
+   * Every other answer (missing field, non-string, any unlisted value —
+   * "pending" included) is unverifiable and leaves the operation UNKNOWN.
    */
   shape: "found-flag" | "status-field";
+  /**
+   * Status-field values the provider contract uses for executed/committed
+   * operations. Default: ["complete"]. Status-field shape only.
+   */
+  completeStatuses?: string[];
+  /**
+   * Status-field values the operator's provider contract PROVES mean the
+   * operation was never executed (definitive FAILED). Everything else —
+   * including "pending" — is unresolved and stays UNKNOWN. Default: none,
+   * so reconcile can never settle FAILED unless the operator opts in.
+   * Status-field shape only. May not overlap completeStatuses, and
+   * "pending" (any case) is rejected in both lists: a pending status is
+   * never a terminal proof.
+   */
+  notExecutedStatuses?: string[];
 }
 
 export interface ConfiguredAction {
@@ -75,7 +93,16 @@ export function actionFingerprint(action: ConfiguredAction): string {
           headers: action.http.headers ?? {},
           secretHeaders: action.http.secretHeaders ?? {},
         },
-        reconcile: { url: action.reconcile.url, shape: action.reconcile.shape },
+        reconcile: {
+          url: action.reconcile.url,
+          shape: action.reconcile.shape,
+          // Interpretation of remote status is part of remote meaning: an
+          // explicitly configured status contract must reject reuse of an
+          // operation recorded under a different one. Absent options are
+          // dropped by stableStringify, preserving the legacy hash.
+          completeStatuses: action.reconcile.completeStatuses,
+          notExecutedStatuses: action.reconcile.notExecutedStatuses,
+        },
       }),
       "utf8",
     )
@@ -150,6 +177,37 @@ function validateAction(raw: unknown, file: string): ConfiguredAction {
     throw new ActionsConfigError(
       `${file}: action "${a.id}" reconcile.url must bind {operationId} — reconciliation must observe THIS operation, not some aggregate`,
     );
+  }
+  const statusLists = new Map<string, string[]>();
+  for (const key of ["completeStatuses", "notExecutedStatuses"] as const) {
+    const value = rec[key];
+    if (value === undefined) continue;
+    if (rec.shape !== "status-field") {
+      throw new ActionsConfigError(`${file}: action "${a.id}" reconcile.${key} requires shape "status-field"`);
+    }
+    if (!Array.isArray(value) || value.length === 0 || value.some((s) => typeof s !== "string" || s.length === 0)) {
+      throw new ActionsConfigError(`${file}: action "${a.id}" reconcile.${key} must be a non-empty list of non-empty strings`);
+    }
+    statusLists.set(key, value as string[]);
+    for (const s of value as string[]) {
+      if (s.toLowerCase() === "pending") {
+        throw new ActionsConfigError(
+          `${file}: action "${a.id}" reconcile.${key} may not list "pending" — a pending status is unresolved, never a terminal proof`,
+        );
+      }
+    }
+  }
+  {
+    // Overlap is checked against the EFFECTIVE complete list — the default
+    // ["complete"] applies even when completeStatuses is not configured.
+    const completed = statusLists.get("completeStatuses") ?? ["complete"];
+    const notExecuted = statusLists.get("notExecutedStatuses");
+    const overlap = completed.filter((s) => notExecuted?.includes(s));
+    if (overlap.length > 0) {
+      throw new ActionsConfigError(
+        `${file}: action "${a.id}" reconcile.completeStatuses and notExecutedStatuses overlap (${overlap.join(", ")}) — a status cannot prove both execution and non-execution`,
+      );
+    }
   }
   for (const [header, envName] of Object.entries((http.secretHeaders as Record<string, unknown>) ?? {})) {
     if (typeof envName !== "string" || envName.length === 0) {
