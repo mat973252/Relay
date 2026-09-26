@@ -149,7 +149,11 @@ It contains:
 - capability requirements
 - migration evidence
 
-It never contains resolved secret values.
+Relay does not automatically read environment values or unselected workspace
+files into capsules. Exported journal payloads, artifact content, explicitly
+supplied adapter material and capability configuration are caller-owned data.
+Callers must review those inputs for secrets before export; arbitrary opaque
+bytes are not proven secret-free.
 
 ## v0.1 migration guarantee
 

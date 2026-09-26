@@ -25,7 +25,7 @@ const config = {
   },
 };
 
-const target = new URL(".mcp.json", `${pluginDir}/`).href;
+const target = new URL(".mcp.json", import.meta.url).href;
 await writeFile(fileURLToPath(target), `${JSON.stringify(config, null, 2)}\n`);
 console.log(`wrote ${fileURLToPath(target)}`);
 console.log(`workspace: ${workspace}`);

@@ -17,7 +17,7 @@ Relay does **not** reimplement Pi's agent loop, session tree, suspended runs, de
 
 ## v0.1 scope
 
-Relay v0.1 proves four milestones:
+Relay v0.1 covers these milestones:
 
 - **M0 — Native integration:** load as a Pi package/extension without forking Pi.
 - **M1 — Crash-safe effects:** unsafe external effects are never silently duplicated.
@@ -38,6 +38,19 @@ Relay v0.1 proves four milestones:
 No Java/Go/Rust in v0.1.
 
 ## Local workspace
+
+The first release is **v0.1.0**, distributed as source under the [MIT license](LICENSE).
+Use Node 22 or 24 and pnpm 10.33.0. The workspace packages are not published to npm.
+
+```bash
+git clone --branch v0.1.0 https://github.com/mat973252/Relay.git
+cd Relay
+corepack pnpm install --frozen-lockfile
+corepack pnpm typecheck
+node examples/crash-demo.mjs
+```
+
+The demo needs no model account. See [release scope and verification](reports/RELEASE_V0.1.0.md).
 
 Everything runs from the repository root; no machine-specific paths are embedded:
 
@@ -110,3 +123,13 @@ servers are outside the guarantee.
 `relay status` emits a `mat-console.status/1` JSON document from a strictly
 read-only open of the local effect journal — aggregate counts and attention
 items only, no effect keys/ids/payloads. See `docs/STATUS-EXPORT.md`.
+
+## Capsule data boundary
+
+Relay does not automatically read environment values or unselected workspace
+files into capsules. Journal payloads, artifact bytes, explicitly supplied adapter
+files and capability configuration are caller-owned data that can be exported.
+Review those inputs before sharing a capsule: Relay does not prove arbitrary
+opaque bytes are secret-free. Migration requires a trusted, single-writer
+workspace; cross-host failover and protection against arbitrary local writers
+are outside v0.1.0.

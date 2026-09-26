@@ -15,7 +15,7 @@
 | T11 | Pi process restart | Relay metadata/artifacts survive |
 | T12 | Capsule interrupted at 25/50/75% | No apparently-valid partial capsule |
 | T13 | Capsule hash corruption | Import rejected |
-| T14 | Secret isolation | Secret plaintext absent from capsule/state/log/artifacts |
+| T14 | Secret isolation | Fixture env secrets are not automatically copied; caller-owned export data requires review |
 | T15 | Machine A -> B import | doctor succeeds before activation |
 | T16 | Deferred migration | original external job ID reused |
 | T17 | Deferred provider 429 | remains pending/backoff |
