@@ -11,6 +11,7 @@
  * The CLI never reads or prints arbitrary environment values.
  */
 import { spawnSync } from "node:child_process";
+import { writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
@@ -26,7 +27,8 @@ import { probeSqliteStorage } from "@relay/storage-sqlite";
 import { ArtifactStore, probeArtifactRoot, type ArtifactRecord, type LineageNode } from "@relay/artifact-fs";
 import { evaluateCapabilitiesFile } from "./capabilities.js";
 import { exportCapsule, importCapsule } from "./capsule.js";
-import { SqliteEffectJournal } from "@relay/storage-sqlite";
+import { SqliteEffectJournal, SqliteEffectJournalReader } from "@relay/storage-sqlite";
+import { buildStatusDocument } from "./status.js";
 
 const USAGE = `relay — durable execution continuity for AI agents (M2)
 
@@ -39,6 +41,7 @@ usage:
   relay export [--output PATH] [--capabilities PATH] [--adapter-context PATH]
                [--workspace PATH]
   relay import <capsule> [--workspace PATH] [--overwrite]
+  relay status [--storage PATH] [--output PATH]
   relay --help
 
 <artifact-ref> accepts a record id, a sha256 digest, or artifact://sha256/<digest>
@@ -49,6 +52,12 @@ else ./relay.capabilities.yaml. Import never touches the root copy.
 
 doctor exit codes:
   0 ok/READY  |  1 degraded/DEGRADED  |  2 blocked/BLOCKED  |  64 usage error
+
+status emits a mat-console.status/1 JSON document from a read-only open of the
+effect journal (no directory/DB creation, no schema migration, no pragma
+writes). With --output the document is written to PATH; otherwise to stdout.
+exit codes: 0 journal sampled | 1 journal unavailable (document still emitted)
+| 2 output write failed | 64 usage error
 `;
 
 interface DoctorArgs {
@@ -231,6 +240,59 @@ async function runEffectsCommand(rest: string[], cwd: string): Promise<number> {
   }
 }
 
+async function runStatusCommand(rest: string[], cwd: string): Promise<number> {
+  let storage: string | undefined;
+  let output: string | undefined;
+  for (let i = 0; i < rest.length; i++) {
+    const arg = rest[i];
+    if (arg === undefined) break;
+    if (arg === "--storage") {
+      storage = requireValue(rest, i + 1, "--storage");
+      i += 1;
+    } else if (arg === "--output") {
+      output = requireValue(rest, i + 1, "--output");
+      i += 1;
+    } else usageError(`unknown argument for status: ${arg}`);
+  }
+  const journalPath = storage ?? join(cwd, ".relay", "storage.db");
+
+  // The journal open is strictly read-only: a missing or unreadable journal
+  // yields a document that says so, never a mutated or fabricated sample.
+  let histories: import("@relay/core").EffectHistory[] = [];
+  let unavailableReason: string | undefined;
+  const reader = await SqliteEffectJournalReader.open({ path: journalPath }).catch((err: unknown) => {
+    const message = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`relay: status journal unavailable: ${message}\n`);
+    if (message.includes("not found")) unavailableReason = "no journal file at the configured path";
+    else if (message.includes("not a Relay effect journal") || message.includes("missing required column")) {
+      unavailableReason = "file at the configured path is not a recognized Relay effect journal";
+    } else unavailableReason = "journal could not be opened read-only";
+    return undefined;
+  });
+  if (reader !== undefined) {
+    try {
+      histories = await reader.listHistory();
+    } finally {
+      reader.close();
+    }
+  }
+
+  const document = buildStatusDocument({ histories, unavailableReason }, new Date());
+  const serialized = `${JSON.stringify(document, null, 2)}\n`;
+  if (output === undefined) {
+    process.stdout.write(serialized);
+  } else {
+    try {
+      await writeFile(output, serialized, "utf8");
+    } catch (err) {
+      process.stderr.write(`relay: cannot write status output: ${err instanceof Error ? err.message : String(err)}\n`);
+      return 2;
+    }
+    process.stdout.write(`wrote ${output}\n`);
+  }
+  return unavailableReason === undefined ? 0 : 1;
+}
+
 async function runExportCommand(rest: string[], cwd: string): Promise<number> {
   let output: string | undefined;
   let workspace: string | undefined;
@@ -331,6 +393,9 @@ export async function main(argv: string[], cwd: string = process.cwd()): Promise
   }
   if (command === "import") {
     return runImportCommand(rest, cwd);
+  }
+  if (command === "status") {
+    return runStatusCommand(rest, cwd);
   }
   if (command !== "doctor") {
     usageError(`unknown command: ${command}`);

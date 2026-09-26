@@ -9,7 +9,7 @@
  * leaves a transition without its event (or vice versa). This is
  * Relay-owned state; it is NOT a Pi session store.
  */
-import { mkdir } from "node:fs/promises";
+import { mkdir, stat } from "node:fs/promises";
 import { dirname } from "node:path";
 import type {
   EffectHistory,
@@ -433,4 +433,180 @@ export class SqliteEffectJournal implements EffectJournal, EffectHistoryReader {
   async list(): Promise<EffectRecord[]> {
     return this.readRecords();
   }
+}
+
+// ---------------------------------------------------------------------------
+// Read-only evidence access (status export).
+//
+// `SqliteEffectJournal.open` is a writer path: it creates the directory and
+// file, switches to WAL, creates/migrates schema and may VACUUM. Exporters
+// must never do any of that to a journal they did not create, so this reader
+// opens the file with SQLITE_OPEN_READONLY via `readOnly: true` — any write
+// attempt (DDL, DML, migrating pragma) fails instead of mutating the input —
+// and reads both tables inside one deferred transaction so rows and events
+// always come from the same committed snapshot.
+//
+// Missing files are never created. A database without `relay_effects` is not
+// a Relay journal and is rejected rather than treated as empty. Optional
+// columns absent in legacy schemas (e.g. `intent_json`) read as NULL; a
+// missing `relay_effect_events` table simply yields `unavailable` history —
+// nothing is backfilled or inferred.
+// ---------------------------------------------------------------------------
+
+const REQUIRED_EFFECT_COLUMNS = [
+  "id",
+  "key",
+  "kind",
+  "request_hash",
+  "replay",
+  "status",
+  "created_at",
+  "updated_at",
+] as const;
+const OPTIONAL_EFFECT_COLUMNS = [
+  "intent_json",
+  "remote_ref",
+  "result_json",
+  "reason",
+  "submitted_at",
+  "settled_at",
+] as const;
+const REQUIRED_EVENT_COLUMNS = ["seq", "effect_id", "key", "kind", "from_status", "to_status", "cause", "at"] as const;
+
+export class SqliteEffectJournalReader implements EffectHistoryReader {
+  private readonly db: import("node:sqlite").DatabaseSync;
+  private readonly effectSelect: string;
+  private readonly eventSelect: string | undefined;
+
+  private constructor(
+    db: import("node:sqlite").DatabaseSync,
+    effectSelect: string,
+    eventSelect: string | undefined,
+  ) {
+    this.db = db;
+    this.effectSelect = effectSelect;
+    this.eventSelect = eventSelect;
+  }
+
+  /**
+   * Open an existing journal read-only. Throws when the path is missing, not
+   * a file, not SQLite, or lacks the `relay_effects` shape — the caller maps
+   * that to an explicit "journal unavailable" report. Never creates the
+   * file, directories, schema, or runs migrations.
+   */
+  static async open(options: SqliteEffectJournalOptions): Promise<SqliteEffectJournalReader> {
+    const info = await stat(options.path).catch(() => undefined);
+    if (info === undefined || !info.isFile()) {
+      throw new Error(`effect journal not found at ${options.path}`);
+    }
+    const sqlite = await import("node:sqlite");
+    const db = new sqlite.DatabaseSync(options.path, { readOnly: true });
+    try {
+      const tables = new Set(
+        (
+          db
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('relay_effects', 'relay_effect_events')")
+            .all() as unknown as { name: string }[]
+        ).map((t) => t.name),
+      );
+      if (!tables.has("relay_effects")) {
+        throw new Error(`${options.path} is not a Relay effect journal (relay_effects table absent)`);
+      }
+      const effectColumns = columnNames(db, "relay_effects");
+      for (const column of REQUIRED_EFFECT_COLUMNS) {
+        if (!effectColumns.has(column)) {
+          throw new Error(`relay_effects schema at ${options.path} is missing required column ${column}`);
+        }
+      }
+      const effectSelect = `SELECT ${selectList(REQUIRED_EFFECT_COLUMNS, OPTIONAL_EFFECT_COLUMNS, effectColumns)} FROM relay_effects`;
+      let eventSelect: string | undefined;
+      if (tables.has("relay_effect_events")) {
+        const eventColumns = columnNames(db, "relay_effect_events");
+        if (REQUIRED_EVENT_COLUMNS.every((column) => eventColumns.has(column))) {
+          // Extra legacy columns (reason, remote_ref) are never selected.
+          eventSelect = `SELECT ${REQUIRED_EVENT_COLUMNS.join(", ")} FROM relay_effect_events`;
+        }
+      }
+      return new SqliteEffectJournalReader(db, effectSelect, eventSelect);
+    } catch (err) {
+      db.close();
+      throw err;
+    }
+  }
+
+  close(): void {
+    this.db.close();
+  }
+
+  private snapshot<T>(work: () => T): T {
+    this.db.exec("BEGIN DEFERRED");
+    try {
+      return work();
+    } finally {
+      this.db.exec("COMMIT");
+    }
+  }
+
+  private readRecords(key?: string): EffectRecord[] {
+    const rows =
+      key === undefined
+        ? this.db.prepare(`${this.effectSelect} ORDER BY created_at, id`).all()
+        : this.db.prepare(`${this.effectSelect} WHERE key = ?`).all(key);
+    return (rows as unknown as EffectRow[]).map(toRecord);
+  }
+
+  private readEvents(effectId?: string): EffectTransitionEvent[] {
+    if (this.eventSelect === undefined) return [];
+    const rows =
+      effectId === undefined
+        ? this.db.prepare(`${this.eventSelect} ORDER BY seq`).all()
+        : this.db.prepare(`${this.eventSelect} WHERE effect_id = ? ORDER BY seq`).all(effectId);
+    return (rows as unknown as EventRow[]).map(toEvent);
+  }
+
+  /** Same coverage semantics as the writable journal: observed / partial / unavailable, never inferred. */
+  async listHistory(key?: string): Promise<EffectHistory[]> {
+    const { records, events } = this.snapshot(() => ({
+      records: this.readRecords(key),
+      events: this.readEvents(),
+    }));
+    const byEffect = new Map<string, EffectTransitionEvent[]>();
+    for (const event of events) {
+      const list = byEffect.get(event.effectId) ?? [];
+      list.push(event);
+      byEffect.set(event.effectId, list);
+    }
+    return records.map((record) => {
+      const own = byEffect.get(record.id) ?? [];
+      const coverage: EffectHistory["coverage"] =
+        own.length === 0 ? "unavailable" : own[0]!.fromStatus === undefined ? "observed" : "partial";
+      return { record, events: own, coverage };
+    });
+  }
+
+  async listEvents(effectId?: string): Promise<EffectTransitionEvent[]> {
+    return this.snapshot(() => this.readEvents(effectId));
+  }
+
+  async list(): Promise<EffectRecord[]> {
+    return this.snapshot(() => this.readRecords());
+  }
+}
+
+function columnNames(db: import("node:sqlite").DatabaseSync, table: string): Set<string> {
+  return new Set(
+    (db.prepare("SELECT name FROM pragma_table_info(?)").all(table) as unknown as { name: string }[]).map(
+      (c) => c.name,
+    ),
+  );
+}
+
+function selectList(
+  required: readonly string[],
+  optional: readonly string[],
+  present: ReadonlySet<string>,
+): string {
+  const missingOptional = optional.filter((c) => !present.has(c));
+  const selected = [...required, ...optional.filter((c) => present.has(c))];
+  return [...selected, ...missingOptional.map((c) => `NULL AS ${c}`)].join(", ");
 }

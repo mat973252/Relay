@@ -86,3 +86,9 @@ Host entries: `hosts/claude-code/relay-effect-guard` and
 on one shared workspace). Protection applies **only** to actions executed
 through the relay tools; raw shell/HTTP, built-in tools, and other MCP
 servers are outside the guarantee.
+
+## Status export (mat-console)
+
+`relay status` emits a `mat-console.status/1` JSON document from a strictly
+read-only open of the local effect journal — aggregate counts and attention
+items only, no effect keys/ids/payloads. See `docs/STATUS-EXPORT.md`.
