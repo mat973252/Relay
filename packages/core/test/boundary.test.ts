@@ -9,7 +9,7 @@
  */
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
 
@@ -118,11 +118,11 @@ describe("workspace boundary invariants", () => {
     for (const pkgName of packages) {
       for (const file of srcFiles(pkgName)) {
         const content = readFileSync(file, "utf8");
-        const relative = file.slice(packagesDir.length).split("\\").join("/");
-        if (sanctioned.some((s) => relative === s)) {
+        const packagePath = relative(packagesDir, file);
+        if (sanctioned.some((s) => packagePath === s)) {
           assert.ok(
             content.includes("process.env"),
-            `${relative} is a sanctioned env reader; keep it reading env here`,
+            `${packagePath} is a sanctioned env reader; keep it reading env here`,
           );
           continue;
         }

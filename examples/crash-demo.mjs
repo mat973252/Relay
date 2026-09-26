@@ -44,10 +44,12 @@ const HOLD_MS = 4000; // provider commits, then holds the response this long
 // ---------------------------------------------------------------------------
 export async function startProvider() {
   let counter = 0;
+  let submissions = 0;
   const effects = new Map();
   const server = createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://demo");
     if (req.method === "POST" && url.pathname === "/increment") {
+      submissions += 1;
       const key = url.searchParams.get("key") ?? "";
       if (effects.has(key)) {
         json(res, 200, { ok: true, deduplicated: true, value: effects.get(key).value });
@@ -65,7 +67,7 @@ export async function startProvider() {
       return;
     }
     if (req.method === "GET" && url.pathname === "/state") {
-      json(res, 200, { counter });
+      json(res, 200, { counter, submissions });
       return;
     }
     json(res, 404, { error: "not found" });
@@ -123,7 +125,7 @@ function effectInput(journal, baseUrl) {
 }
 
 // ---------------------------------------------------------------------------
-// Phases. "crash" runs in a child process that SIGKILLs itself while the
+// Phases. "crash" runs in a child process that is force-killed while the
 // provider response is still pending (i.e., after the remote commit).
 // ---------------------------------------------------------------------------
 async function phaseCrash(dbPath, baseUrl) {
@@ -161,13 +163,19 @@ async function orchestrate() {
   const runPhase = (name) =>
     new Promise((resolve, reject) => {
       const child = spawn(process.execPath, [self, name, dbPath, provider.baseUrl], {
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: ["ignore", "pipe", "pipe", "ipc"],
       });
       let out = "";
+      let killRequested = false;
+      child.on("message", (message) => {
+        if (name === "crash" && message === "remote-commit-observed") {
+          killRequested = child.kill("SIGKILL");
+        }
+      });
       child.stdout.on("data", (c) => (out += c));
       child.stderr.on("data", (c) => (out += c));
       child.on("error", reject);
-      child.on("close", (status, signal) => resolve({ status, signal, out }));
+      child.on("close", (status, signal) => resolve({ status, signal, out, killRequested }));
     });
 
   try {
@@ -180,8 +188,18 @@ async function orchestrate() {
     console.log(
       `[orchestrator] crash phase: signal=${crashed.signal} status=${crashed.status} remoteCommitted=${sawRemoteCommit}`,
     );
-    if (crashed.signal !== "SIGKILL" || !sawRemoteCommit) {
-      throw new Error("precondition failed: child must die by SIGKILL after the remote commit");
+    const killed = crashed.killRequested && (
+      crashed.signal === "SIGKILL" ||
+      (process.platform === "win32" && crashed.signal === null && crashed.status === 1)
+    );
+    if (!killed || !sawRemoteCommit) {
+      throw new Error(`precondition failed: child must be force-killed after the remote commit\n${crashed.out}`);
+    }
+    const crashedJournal = await SqliteEffectJournal.open({ path: dbPath });
+    const crashRecord = await crashedJournal.getByKey(`counter-increment:${OPERATION_ID}`);
+    crashedJournal.close();
+    if (crashRecord?.status !== "SUBMITTED") {
+      throw new Error("precondition failed: crash must precede local confirmation");
     }
 
     log("PHASE 2 — restart, replay the SAME operation id");
@@ -190,7 +208,7 @@ async function orchestrate() {
     if (resumed.status !== 0) throw new Error("resume phase failed");
 
     log("ASSERTIONS");
-    const counter = (await getJson(new URL("/state", provider.baseUrl))).counter;
+    const { counter, submissions } = await getJson(new URL("/state", provider.baseUrl));
     const journal = await SqliteEffectJournal.open({ path: dbPath });
     const records = await journal.list();
     const [history] = await journal.listHistory(`counter-increment:${OPERATION_ID}`);
@@ -200,6 +218,7 @@ async function orchestrate() {
     console.log(`  history coverage=${history?.coverage ?? "n/a"} events=${transitions.join(" ")}`);
     const checks = [
       ["remote counter === 1 (no silent duplicate)", counter === 1],
+      ["submit requests === 1 (provider deduplication cannot hide a retry)", submissions === 1],
       ["journal record exists", record !== undefined],
       ["journal status === CONFIRMED", record?.status === "CONFIRMED"],
       ["confirmation came via reconciliation", resumed.out.includes("reconciled=true")],
@@ -218,7 +237,7 @@ async function orchestrate() {
     console.log(
       [
         `1. The child submitted the increment; the provider committed it (counter=1) and held the response.`,
-        `2. The child was SIGKILLed before any local CONFIRMED could be written.`,
+        `2. The child was force-killed before any local CONFIRMED could be written.`,
         `3. On restart the same operation id replayed as an ambiguous effect.`,
         `4. Relay did NOT resend the increment; it asked the provider a read-only question.`,
         `5. The provider said "found"; only then did Relay mark the effect CONFIRMED.`,
@@ -236,12 +255,17 @@ const [phase, dbPath, baseUrl] = process.argv.slice(2);
 if (phase === "crash" && dbPath && baseUrl) {
   // Race: runEffect waits for the held response while a watcher polls the
   // provider's read-only /effects endpoint. The moment the remote commit is
-  // observable, this process dies for real — before any local CONFIRMED.
+  // observable, notify the parent to force-kill us (or kill ourselves when
+  // run standalone) — before any local CONFIRMED.
   const crashWhenCommitted = async () => {
     for (let i = 0; i < 500; i += 1) {
       const body = await getJson(new URL(`/effects/${encodeURIComponent(OPERATION_ID)}`, baseUrl));
       if (body.found === true) {
         console.log(`[crash] remote commit observed; dying before the response arrives`);
+        if (process.send) {
+          process.send("remote-commit-observed");
+          return; // the parent observes the kill it requested on both platforms
+        }
         process.kill(process.pid, "SIGKILL");
       }
       await new Promise((r) => setTimeout(r, 10));

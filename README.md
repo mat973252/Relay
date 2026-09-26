@@ -62,11 +62,11 @@ corepack pnpm install && corepack pnpm typecheck   # build once
 node examples/crash-demo.mjs
 ```
 
-Expected tail of the output: a child process is SIGKILLed **after** the local
+Expected tail of the output: a child process is force-killed **after** the local
 HTTP counter has committed but before any local confirmation; on restart the
 same operation id replays, Relay asks a read-only reconciliation question,
-and the assertions print `PASS` four times with the remote counter at exactly
-1. Real guarantee: **no silent retry of an ambiguous unsafe action** —
+and the assertions print `PASS` seven times with both the remote counter and
+submit-request count at exactly 1. Real guarantee: **no silent retry of an ambiguous unsafe action** —
 stronger guarantees need downstream idempotency or a reliable reconciliation
 query.
 
