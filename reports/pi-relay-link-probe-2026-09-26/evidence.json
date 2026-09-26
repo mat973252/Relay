@@ -1,0 +1,791 @@
+{
+  "probe": "pi-relay-link-probe",
+  "generatedAt": "2026-09-26T01:11:27.434Z",
+  "versions": {
+    "node": "v24.19.0",
+    "platform": "linux x64",
+    "pi": "0.87.0",
+    "relaySourceSha": "8e877a93b5f6caafd98d06b0f2a1546e7b6a356d"
+  },
+  "loopbackProvider": {
+    "baseUrl": "http://127.0.0.1:36677",
+    "counterAfterSuccessScenario": 1,
+    "counterFinal": 4,
+    "committedOperationIds": [
+      "probe-success-4f2814e3",
+      "probe-ambiguous-4f2814e3",
+      "probe-alpha-4f2814e3",
+      "probe-beta-4f2814e3"
+    ],
+    "requests": [
+      "POST /increment",
+      "POST /increment-ambiguous",
+      "POST /increment",
+      "POST /increment"
+    ]
+  },
+  "scenarios": [
+    {
+      "scenario": "success",
+      "requested": [
+        {
+          "actionId": "counter-increment",
+          "operationId": "probe-success-4f2814e3",
+          "intent": "probe: increment loopback counter once",
+          "toolCallId": "probe-call-17ff6d5e-e255-454f-bc06-8f1069d6f163"
+        }
+      ],
+      "mcpServerInfo": {
+        "name": "relay",
+        "version": "0.1.0",
+        "ownership": "acquired"
+      },
+      "mcpToolsOffered": [
+        "relay_submit_action",
+        "relay_list_unresolved",
+        "relay_reconcile_operation",
+        "relay_get_operation"
+      ],
+      "toolsDeclaredToModel": [
+        "relay_submit_action",
+        "relay_list_unresolved",
+        "relay_reconcile_operation",
+        "relay_get_operation"
+      ],
+      "bridgeCalls": [
+        {
+          "toolCallId": "probe-call-17ff6d5e-e255-454f-bc06-8f1069d6f163",
+          "tool": "relay_submit_action",
+          "arguments": {
+            "actionId": "counter-increment",
+            "operationId": "probe-success-4f2814e3",
+            "intent": "probe: increment loopback counter once"
+          },
+          "isError": false
+        }
+      ],
+      "piSessionId": "01a0db44-6244-708e-8283-322db59a09dc",
+      "piSessionFile": "/tmp/relay-link-probe-root-WQq0vW/success-sessions-onuXu6/2026-09-26T01-11-27-044Z_01a0db44-6244-708e-8283-322db59a09dc.jsonl",
+      "piSessionSha256": "0552c5b8f84b6af9c2ccc634fc1f1bff65d594240b8cf2e664325535bb827fe3",
+      "actionsFileSha256": "8ea6410d338e7ced17f03bd9c8be22e03e1407222ad549778e02da2edfed8bac",
+      "journalSha256": "17eb5a90ef1297bad3e02b22fe62132cae11b3fae57190f7f170bdd301167a5c",
+      "sessionEntries": [
+        {
+          "id": "01a0db44-6244-708e-8283-322db59a09dc",
+          "type": "session"
+        },
+        {
+          "id": "c15dae05",
+          "parentId": null,
+          "type": "model_change"
+        },
+        {
+          "id": "8d69899d",
+          "parentId": "c15dae05",
+          "type": "thinking_level_change"
+        },
+        {
+          "id": "9b309e24",
+          "parentId": "8d69899d",
+          "type": "message",
+          "role": "system"
+        },
+        {
+          "id": "4bb05fc7",
+          "parentId": "9b309e24",
+          "type": "message",
+          "role": "user"
+        },
+        {
+          "id": "04c6cb9c",
+          "parentId": "4bb05fc7",
+          "type": "message",
+          "role": "assistant",
+          "toolCalls": [
+            {
+              "id": "probe-call-17ff6d5e-e255-454f-bc06-8f1069d6f163",
+              "name": "relay_submit_action",
+              "arguments": {
+                "actionId": "counter-increment",
+                "operationId": "probe-success-4f2814e3",
+                "intent": "probe: increment loopback counter once"
+              }
+            }
+          ]
+        },
+        {
+          "id": "cb38596a",
+          "parentId": "04c6cb9c",
+          "type": "message",
+          "role": "toolResult",
+          "toolResult": {
+            "toolCallId": "probe-call-17ff6d5e-e255-454f-bc06-8f1069d6f163",
+            "toolName": "relay_submit_action",
+            "isError": false,
+            "text": "{\"status\":\"confirmed\",\"key\":\"counter-increment:probe-success-4f2814e3\",\"result\":{\"ok\":true,\"value\":1},\"deduplicated\":false,\"reconciled\":false}"
+          }
+        },
+        {
+          "id": "0fa86ae8",
+          "parentId": "cb38596a",
+          "type": "message",
+          "role": "assistant",
+          "toolCalls": []
+        }
+      ],
+      "journal": {
+        "tables": [
+          "relay_effect_events",
+          "relay_effects",
+          "sqlite_sequence"
+        ],
+        "effectColumns": [
+          "id",
+          "key",
+          "kind",
+          "request_hash",
+          "replay",
+          "status",
+          "remote_ref",
+          "result_json",
+          "reason",
+          "created_at",
+          "submitted_at",
+          "settled_at",
+          "updated_at",
+          "intent_json"
+        ],
+        "eventColumns": [
+          "seq",
+          "effect_id",
+          "key",
+          "kind",
+          "from_status",
+          "to_status",
+          "cause",
+          "at"
+        ],
+        "effects": [
+          {
+            "id": "f65f1ce1-8b8c-4b60-ba30-d553ca90f21e",
+            "key": "counter-increment:probe-success-4f2814e3",
+            "kind": "mcp:counter-increment",
+            "request_hash": "b89e4ab93ad9a50f7730ef7dc091f569a6c2d393e30df38bc7fd25869f70c022",
+            "intent_json": "probe: increment loopback counter once",
+            "replay": "never",
+            "status": "CONFIRMED",
+            "created_at": 1790385087057,
+            "submitted_at": 1790385087062,
+            "settled_at": 1790385087090,
+            "updated_at": 1790385087090,
+            "has_reason": 0,
+            "has_result_json": 1,
+            "has_remote_ref": 0
+          }
+        ],
+        "events": [
+          {
+            "seq": 1,
+            "effect_id": "f65f1ce1-8b8c-4b60-ba30-d553ca90f21e",
+            "key": "counter-increment:probe-success-4f2814e3",
+            "kind": "mcp:counter-increment",
+            "from_status": null,
+            "to_status": "PREPARED",
+            "cause": "prepare",
+            "at": 1790385087057
+          },
+          {
+            "seq": 2,
+            "effect_id": "f65f1ce1-8b8c-4b60-ba30-d553ca90f21e",
+            "key": "counter-increment:probe-success-4f2814e3",
+            "kind": "mcp:counter-increment",
+            "from_status": "PREPARED",
+            "to_status": "SUBMITTED",
+            "cause": "submit",
+            "at": 1790385087062
+          },
+          {
+            "seq": 3,
+            "effect_id": "f65f1ce1-8b8c-4b60-ba30-d553ca90f21e",
+            "key": "counter-increment:probe-success-4f2814e3",
+            "kind": "mcp:counter-increment",
+            "from_status": "SUBMITTED",
+            "to_status": "CONFIRMED",
+            "cause": "execute",
+            "at": 1790385087090
+          }
+        ]
+      },
+      "relayCliHistory": {
+        "status": 0,
+        "stdout": "CONFIRMED counter-increment:probe-success-4f2814e3  f65f1ce1-8b8c-4b60-ba30-d553ca90f21e  history=observed\n  #1 - -> PREPARED (prepare) @1790385087057\n  #2 PREPARED -> SUBMITTED (submit) @1790385087062\n  #3 SUBMITTED -> CONFIRMED (execute) @1790385087090\n",
+        "stderr": ""
+      },
+      "workspace": "/tmp/relay-link-probe-root-WQq0vW/success-ws-8eSZbq",
+      "sessionDir": "/tmp/relay-link-probe-root-WQq0vW/success-sessions-onuXu6",
+      "linkChecks": [
+        {
+          "toolCallId": "probe-call-17ff6d5e-e255-454f-bc06-8f1069d6f163",
+          "expectedKey": "counter-increment:probe-success-4f2814e3",
+          "sessionToolCallArgumentsMatch": true,
+          "toolResultTextContainsKey": true,
+          "journalRowExistsForKey": true,
+          "journalRowStatus": "CONFIRMED",
+          "journalRowKind": "mcp:counter-increment",
+          "journalEventsForKey": [
+            "-->PREPARED(prepare)",
+            "PREPARED->SUBMITTED(submit)",
+            "SUBMITTED->CONFIRMED(execute)"
+          ],
+          "eventEffectIdsMatchRow": true,
+          "otherKeysInJournal": []
+        }
+      ]
+    },
+    {
+      "scenario": "ambiguous",
+      "requested": [
+        {
+          "actionId": "counter-increment-ambiguous",
+          "operationId": "probe-ambiguous-4f2814e3",
+          "intent": "probe: provider commits then answers 503",
+          "toolCallId": "probe-call-b4d3bf26-7e3c-4e3f-b9b4-d9afbf095423"
+        }
+      ],
+      "mcpServerInfo": {
+        "name": "relay",
+        "version": "0.1.0",
+        "ownership": "acquired"
+      },
+      "mcpToolsOffered": [
+        "relay_submit_action",
+        "relay_list_unresolved",
+        "relay_reconcile_operation",
+        "relay_get_operation"
+      ],
+      "toolsDeclaredToModel": [
+        "relay_submit_action",
+        "relay_list_unresolved",
+        "relay_reconcile_operation",
+        "relay_get_operation"
+      ],
+      "bridgeCalls": [
+        {
+          "toolCallId": "probe-call-b4d3bf26-7e3c-4e3f-b9b4-d9afbf095423",
+          "tool": "relay_submit_action",
+          "arguments": {
+            "actionId": "counter-increment-ambiguous",
+            "operationId": "probe-ambiguous-4f2814e3",
+            "intent": "probe: provider commits then answers 503"
+          },
+          "isError": false
+        }
+      ],
+      "piSessionId": "01a0db44-62d1-708e-8283-322ef0f6df46",
+      "piSessionFile": "/tmp/relay-link-probe-root-WQq0vW/ambiguous-sessions-5syngS/2026-09-26T01-11-27-185Z_01a0db44-62d1-708e-8283-322ef0f6df46.jsonl",
+      "piSessionSha256": "8f48e6128ad8781319fdcd7213c75fb12d96508fd0d87cab82984041fc33b70d",
+      "actionsFileSha256": "8ea6410d338e7ced17f03bd9c8be22e03e1407222ad549778e02da2edfed8bac",
+      "journalSha256": "03f2abc7d6a0ce9d41252a6ae6b6c1b01b98a3f37e4db0b8c50db0548d516a9e",
+      "sessionEntries": [
+        {
+          "id": "01a0db44-62d1-708e-8283-322ef0f6df46",
+          "type": "session"
+        },
+        {
+          "id": "4e5563a6",
+          "parentId": null,
+          "type": "model_change"
+        },
+        {
+          "id": "cc30078c",
+          "parentId": "4e5563a6",
+          "type": "thinking_level_change"
+        },
+        {
+          "id": "df4b99b8",
+          "parentId": "cc30078c",
+          "type": "message",
+          "role": "system"
+        },
+        {
+          "id": "adb705d9",
+          "parentId": "df4b99b8",
+          "type": "message",
+          "role": "user"
+        },
+        {
+          "id": "06d2e470",
+          "parentId": "adb705d9",
+          "type": "message",
+          "role": "assistant",
+          "toolCalls": [
+            {
+              "id": "probe-call-b4d3bf26-7e3c-4e3f-b9b4-d9afbf095423",
+              "name": "relay_submit_action",
+              "arguments": {
+                "actionId": "counter-increment-ambiguous",
+                "operationId": "probe-ambiguous-4f2814e3",
+                "intent": "probe: provider commits then answers 503"
+              }
+            }
+          ]
+        },
+        {
+          "id": "e7101b17",
+          "parentId": "06d2e470",
+          "type": "message",
+          "role": "toolResult",
+          "toolResult": {
+            "toolCallId": "probe-call-b4d3bf26-7e3c-4e3f-b9b4-d9afbf095423",
+            "toolName": "relay_submit_action",
+            "isError": false,
+            "text": "{\"status\":\"unknown\",\"key\":\"counter-increment-ambiguous:probe-ambiguous-4f2814e3\",\"reason\":\"ambiguous: provider answered HTTP 503 for counter-increment-ambiguous: not provably a pre-commit rejection\"}\nOUTCOME AMBIGUOUS — do NOT resubmit this operationId. Call relay_reconcile_operation { actionId: \"counter-increment-ambiguous\", operationId: \"probe-ambiguous-4f2814e3\" } and act on its result."
+          }
+        },
+        {
+          "id": "16d982f2",
+          "parentId": "e7101b17",
+          "type": "message",
+          "role": "assistant",
+          "toolCalls": []
+        }
+      ],
+      "journal": {
+        "tables": [
+          "relay_effect_events",
+          "relay_effects",
+          "sqlite_sequence"
+        ],
+        "effectColumns": [
+          "id",
+          "key",
+          "kind",
+          "request_hash",
+          "replay",
+          "status",
+          "remote_ref",
+          "result_json",
+          "reason",
+          "created_at",
+          "submitted_at",
+          "settled_at",
+          "updated_at",
+          "intent_json"
+        ],
+        "eventColumns": [
+          "seq",
+          "effect_id",
+          "key",
+          "kind",
+          "from_status",
+          "to_status",
+          "cause",
+          "at"
+        ],
+        "effects": [
+          {
+            "id": "2ecf974b-387a-45bd-aa79-163fae9c13af",
+            "key": "counter-increment-ambiguous:probe-ambiguous-4f2814e3",
+            "kind": "mcp:counter-increment-ambiguous",
+            "request_hash": "909c165f52e1109b551da8bbb50a4b718b96ef7cdb4691a4135e59ddafbb20af",
+            "intent_json": "probe: provider commits then answers 503",
+            "replay": "never",
+            "status": "UNKNOWN",
+            "created_at": 1790385087188,
+            "submitted_at": 1790385087190,
+            "settled_at": null,
+            "updated_at": 1790385087215,
+            "has_reason": 1,
+            "has_result_json": 0,
+            "has_remote_ref": 0
+          }
+        ],
+        "events": [
+          {
+            "seq": 1,
+            "effect_id": "2ecf974b-387a-45bd-aa79-163fae9c13af",
+            "key": "counter-increment-ambiguous:probe-ambiguous-4f2814e3",
+            "kind": "mcp:counter-increment-ambiguous",
+            "from_status": null,
+            "to_status": "PREPARED",
+            "cause": "prepare",
+            "at": 1790385087188
+          },
+          {
+            "seq": 2,
+            "effect_id": "2ecf974b-387a-45bd-aa79-163fae9c13af",
+            "key": "counter-increment-ambiguous:probe-ambiguous-4f2814e3",
+            "kind": "mcp:counter-increment-ambiguous",
+            "from_status": "PREPARED",
+            "to_status": "SUBMITTED",
+            "cause": "submit",
+            "at": 1790385087190
+          },
+          {
+            "seq": 3,
+            "effect_id": "2ecf974b-387a-45bd-aa79-163fae9c13af",
+            "key": "counter-increment-ambiguous:probe-ambiguous-4f2814e3",
+            "kind": "mcp:counter-increment-ambiguous",
+            "from_status": "SUBMITTED",
+            "to_status": "UNKNOWN",
+            "cause": "execute",
+            "at": 1790385087215
+          }
+        ]
+      },
+      "relayCliHistory": {
+        "status": 0,
+        "stdout": "UNKNOWN   counter-increment-ambiguous:probe-ambiguous-4f2814e3  2ecf974b-387a-45bd-aa79-163fae9c13af  history=observed\n  #1 - -> PREPARED (prepare) @1790385087188\n  #2 PREPARED -> SUBMITTED (submit) @1790385087190\n  #3 SUBMITTED -> UNKNOWN (execute) @1790385087215\n",
+        "stderr": ""
+      },
+      "workspace": "/tmp/relay-link-probe-root-WQq0vW/ambiguous-ws-WBc57X",
+      "sessionDir": "/tmp/relay-link-probe-root-WQq0vW/ambiguous-sessions-5syngS",
+      "linkChecks": [
+        {
+          "toolCallId": "probe-call-b4d3bf26-7e3c-4e3f-b9b4-d9afbf095423",
+          "expectedKey": "counter-increment-ambiguous:probe-ambiguous-4f2814e3",
+          "sessionToolCallArgumentsMatch": true,
+          "toolResultTextContainsKey": true,
+          "journalRowExistsForKey": true,
+          "journalRowStatus": "UNKNOWN",
+          "journalRowKind": "mcp:counter-increment-ambiguous",
+          "journalEventsForKey": [
+            "-->PREPARED(prepare)",
+            "PREPARED->SUBMITTED(submit)",
+            "SUBMITTED->UNKNOWN(execute)"
+          ],
+          "eventEffectIdsMatchRow": true,
+          "otherKeysInJournal": []
+        }
+      ]
+    },
+    {
+      "scenario": "two-calls",
+      "requested": [
+        {
+          "actionId": "counter-increment",
+          "operationId": "probe-alpha-4f2814e3",
+          "intent": "probe: first of two",
+          "toolCallId": "probe-call-a88e84bb-4376-46d5-af2f-b887381cc031"
+        },
+        {
+          "actionId": "counter-increment",
+          "operationId": "probe-beta-4f2814e3",
+          "intent": "probe: second of two",
+          "toolCallId": "probe-call-df35e686-9ca9-4474-971c-4c77d9185c53"
+        }
+      ],
+      "mcpServerInfo": {
+        "name": "relay",
+        "version": "0.1.0",
+        "ownership": "acquired"
+      },
+      "mcpToolsOffered": [
+        "relay_submit_action",
+        "relay_list_unresolved",
+        "relay_reconcile_operation",
+        "relay_get_operation"
+      ],
+      "toolsDeclaredToModel": [
+        "relay_submit_action",
+        "relay_list_unresolved",
+        "relay_reconcile_operation",
+        "relay_get_operation"
+      ],
+      "bridgeCalls": [
+        {
+          "toolCallId": "probe-call-a88e84bb-4376-46d5-af2f-b887381cc031",
+          "tool": "relay_submit_action",
+          "arguments": {
+            "actionId": "counter-increment",
+            "operationId": "probe-alpha-4f2814e3",
+            "intent": "probe: first of two"
+          },
+          "isError": false
+        },
+        {
+          "toolCallId": "probe-call-df35e686-9ca9-4474-971c-4c77d9185c53",
+          "tool": "relay_submit_action",
+          "arguments": {
+            "actionId": "counter-increment",
+            "operationId": "probe-beta-4f2814e3",
+            "intent": "probe: second of two"
+          },
+          "isError": false
+        }
+      ],
+      "piSessionId": "01a0db44-634d-708e-8283-32309ce3e896",
+      "piSessionFile": "/tmp/relay-link-probe-root-WQq0vW/two-calls-sessions-KE1MaO/2026-09-26T01-11-27-310Z_01a0db44-634d-708e-8283-32309ce3e896.jsonl",
+      "piSessionSha256": "bf3bc8a1459a56b890db30b699946fbe80f93615ab61b7f11cf144cd2d0d7cf6",
+      "actionsFileSha256": "8ea6410d338e7ced17f03bd9c8be22e03e1407222ad549778e02da2edfed8bac",
+      "journalSha256": "0686b0b4e3bd1440b35ccf7ab534dd06fa5227ed956adf65023a1333b8a4bc53",
+      "sessionEntries": [
+        {
+          "id": "01a0db44-634d-708e-8283-32309ce3e896",
+          "type": "session"
+        },
+        {
+          "id": "f8b16128",
+          "parentId": null,
+          "type": "model_change"
+        },
+        {
+          "id": "b3d5fab7",
+          "parentId": "f8b16128",
+          "type": "thinking_level_change"
+        },
+        {
+          "id": "b69eb908",
+          "parentId": "b3d5fab7",
+          "type": "message",
+          "role": "system"
+        },
+        {
+          "id": "610456d3",
+          "parentId": "b69eb908",
+          "type": "message",
+          "role": "user"
+        },
+        {
+          "id": "9b906695",
+          "parentId": "610456d3",
+          "type": "message",
+          "role": "assistant",
+          "toolCalls": [
+            {
+              "id": "probe-call-a88e84bb-4376-46d5-af2f-b887381cc031",
+              "name": "relay_submit_action",
+              "arguments": {
+                "actionId": "counter-increment",
+                "operationId": "probe-alpha-4f2814e3",
+                "intent": "probe: first of two"
+              }
+            }
+          ]
+        },
+        {
+          "id": "b0a2e05f",
+          "parentId": "9b906695",
+          "type": "message",
+          "role": "toolResult",
+          "toolResult": {
+            "toolCallId": "probe-call-a88e84bb-4376-46d5-af2f-b887381cc031",
+            "toolName": "relay_submit_action",
+            "isError": false,
+            "text": "{\"status\":\"confirmed\",\"key\":\"counter-increment:probe-alpha-4f2814e3\",\"result\":{\"ok\":true,\"value\":3},\"deduplicated\":false,\"reconciled\":false}"
+          }
+        },
+        {
+          "id": "7e7b06d5",
+          "parentId": "b0a2e05f",
+          "type": "message",
+          "role": "assistant",
+          "toolCalls": [
+            {
+              "id": "probe-call-df35e686-9ca9-4474-971c-4c77d9185c53",
+              "name": "relay_submit_action",
+              "arguments": {
+                "actionId": "counter-increment",
+                "operationId": "probe-beta-4f2814e3",
+                "intent": "probe: second of two"
+              }
+            }
+          ]
+        },
+        {
+          "id": "fec80023",
+          "parentId": "7e7b06d5",
+          "type": "message",
+          "role": "toolResult",
+          "toolResult": {
+            "toolCallId": "probe-call-df35e686-9ca9-4474-971c-4c77d9185c53",
+            "toolName": "relay_submit_action",
+            "isError": false,
+            "text": "{\"status\":\"confirmed\",\"key\":\"counter-increment:probe-beta-4f2814e3\",\"result\":{\"ok\":true,\"value\":4},\"deduplicated\":false,\"reconciled\":false}"
+          }
+        },
+        {
+          "id": "e8ccfebd",
+          "parentId": "fec80023",
+          "type": "message",
+          "role": "assistant",
+          "toolCalls": []
+        }
+      ],
+      "journal": {
+        "tables": [
+          "relay_effect_events",
+          "relay_effects",
+          "sqlite_sequence"
+        ],
+        "effectColumns": [
+          "id",
+          "key",
+          "kind",
+          "request_hash",
+          "replay",
+          "status",
+          "remote_ref",
+          "result_json",
+          "reason",
+          "created_at",
+          "submitted_at",
+          "settled_at",
+          "updated_at",
+          "intent_json"
+        ],
+        "eventColumns": [
+          "seq",
+          "effect_id",
+          "key",
+          "kind",
+          "from_status",
+          "to_status",
+          "cause",
+          "at"
+        ],
+        "effects": [
+          {
+            "id": "8de4fea4-4547-424f-ac41-37da7667d292",
+            "key": "counter-increment:probe-alpha-4f2814e3",
+            "kind": "mcp:counter-increment",
+            "request_hash": "bee50327f82aceb38ee7ee3d3b266208bb55090d2cba7b84a06ef5aeda53ee39",
+            "intent_json": "probe: first of two",
+            "replay": "never",
+            "status": "CONFIRMED",
+            "created_at": 1790385087312,
+            "submitted_at": 1790385087315,
+            "settled_at": 1790385087342,
+            "updated_at": 1790385087342,
+            "has_reason": 0,
+            "has_result_json": 1,
+            "has_remote_ref": 0
+          },
+          {
+            "id": "e715fec9-89f5-4872-92c5-86efe74a1f3b",
+            "key": "counter-increment:probe-beta-4f2814e3",
+            "kind": "mcp:counter-increment",
+            "request_hash": "3485f6cc254da080e419f21c72a4227b1eff2d78006f8c02146d447fddd2bbd6",
+            "intent_json": "probe: second of two",
+            "replay": "never",
+            "status": "CONFIRMED",
+            "created_at": 1790385087344,
+            "submitted_at": 1790385087344,
+            "settled_at": 1790385087348,
+            "updated_at": 1790385087348,
+            "has_reason": 0,
+            "has_result_json": 1,
+            "has_remote_ref": 0
+          }
+        ],
+        "events": [
+          {
+            "seq": 1,
+            "effect_id": "8de4fea4-4547-424f-ac41-37da7667d292",
+            "key": "counter-increment:probe-alpha-4f2814e3",
+            "kind": "mcp:counter-increment",
+            "from_status": null,
+            "to_status": "PREPARED",
+            "cause": "prepare",
+            "at": 1790385087312
+          },
+          {
+            "seq": 2,
+            "effect_id": "8de4fea4-4547-424f-ac41-37da7667d292",
+            "key": "counter-increment:probe-alpha-4f2814e3",
+            "kind": "mcp:counter-increment",
+            "from_status": "PREPARED",
+            "to_status": "SUBMITTED",
+            "cause": "submit",
+            "at": 1790385087315
+          },
+          {
+            "seq": 3,
+            "effect_id": "8de4fea4-4547-424f-ac41-37da7667d292",
+            "key": "counter-increment:probe-alpha-4f2814e3",
+            "kind": "mcp:counter-increment",
+            "from_status": "SUBMITTED",
+            "to_status": "CONFIRMED",
+            "cause": "execute",
+            "at": 1790385087342
+          },
+          {
+            "seq": 4,
+            "effect_id": "e715fec9-89f5-4872-92c5-86efe74a1f3b",
+            "key": "counter-increment:probe-beta-4f2814e3",
+            "kind": "mcp:counter-increment",
+            "from_status": null,
+            "to_status": "PREPARED",
+            "cause": "prepare",
+            "at": 1790385087344
+          },
+          {
+            "seq": 5,
+            "effect_id": "e715fec9-89f5-4872-92c5-86efe74a1f3b",
+            "key": "counter-increment:probe-beta-4f2814e3",
+            "kind": "mcp:counter-increment",
+            "from_status": "PREPARED",
+            "to_status": "SUBMITTED",
+            "cause": "submit",
+            "at": 1790385087344
+          },
+          {
+            "seq": 6,
+            "effect_id": "e715fec9-89f5-4872-92c5-86efe74a1f3b",
+            "key": "counter-increment:probe-beta-4f2814e3",
+            "kind": "mcp:counter-increment",
+            "from_status": "SUBMITTED",
+            "to_status": "CONFIRMED",
+            "cause": "execute",
+            "at": 1790385087348
+          }
+        ]
+      },
+      "relayCliHistory": {
+        "status": 0,
+        "stdout": "CONFIRMED counter-increment:probe-alpha-4f2814e3  8de4fea4-4547-424f-ac41-37da7667d292  history=observed\n  #1 - -> PREPARED (prepare) @1790385087312\n  #2 PREPARED -> SUBMITTED (submit) @1790385087315\n  #3 SUBMITTED -> CONFIRMED (execute) @1790385087342\nCONFIRMED counter-increment:probe-beta-4f2814e3  e715fec9-89f5-4872-92c5-86efe74a1f3b  history=observed\n  #4 - -> PREPARED (prepare) @1790385087344\n  #5 PREPARED -> SUBMITTED (submit) @1790385087344\n  #6 SUBMITTED -> CONFIRMED (execute) @1790385087348\n",
+        "stderr": ""
+      },
+      "workspace": "/tmp/relay-link-probe-root-WQq0vW/two-calls-ws-wV9KsN",
+      "sessionDir": "/tmp/relay-link-probe-root-WQq0vW/two-calls-sessions-KE1MaO",
+      "linkChecks": [
+        {
+          "toolCallId": "probe-call-a88e84bb-4376-46d5-af2f-b887381cc031",
+          "expectedKey": "counter-increment:probe-alpha-4f2814e3",
+          "sessionToolCallArgumentsMatch": true,
+          "toolResultTextContainsKey": true,
+          "journalRowExistsForKey": true,
+          "journalRowStatus": "CONFIRMED",
+          "journalRowKind": "mcp:counter-increment",
+          "journalEventsForKey": [
+            "-->PREPARED(prepare)",
+            "PREPARED->SUBMITTED(submit)",
+            "SUBMITTED->CONFIRMED(execute)"
+          ],
+          "eventEffectIdsMatchRow": true,
+          "otherKeysInJournal": [
+            "counter-increment:probe-beta-4f2814e3"
+          ]
+        },
+        {
+          "toolCallId": "probe-call-df35e686-9ca9-4474-971c-4c77d9185c53",
+          "expectedKey": "counter-increment:probe-beta-4f2814e3",
+          "sessionToolCallArgumentsMatch": true,
+          "toolResultTextContainsKey": true,
+          "journalRowExistsForKey": true,
+          "journalRowStatus": "CONFIRMED",
+          "journalRowKind": "mcp:counter-increment",
+          "journalEventsForKey": [
+            "-->PREPARED(prepare)",
+            "PREPARED->SUBMITTED(submit)",
+            "SUBMITTED->CONFIRMED(execute)"
+          ],
+          "eventEffectIdsMatchRow": true,
+          "otherKeysInJournal": [
+            "counter-increment:probe-alpha-4f2814e3"
+          ]
+        }
+      ]
+    }
+  ]
+}
