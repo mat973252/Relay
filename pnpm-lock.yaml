@@ -21,38 +21,38 @@ importers:
         specifier: ^0.87.1
         version: 0.87.1(ws@8.21.3)
       '@relay/artifact-fs':
-        specifier: workspace:*
+        specifier: workspace:@mat973252/relay-artifact-fs@*
         version: link:../artifact-fs
       '@relay/core':
-        specifier: workspace:*
+        specifier: workspace:@mat973252/relay-core@*
         version: link:../core
       '@relay/storage-sqlite':
-        specifier: workspace:*
+        specifier: workspace:@mat973252/relay-storage-sqlite@*
         version: link:../storage-sqlite
     devDependencies:
       '@earendil-works/pi-coding-agent':
         specifier: 0.87.0
         version: 0.87.0(ws@8.21.3)
       '@relay/cli':
-        specifier: workspace:*
+        specifier: workspace:@mat973252/relay-cli@*
         version: link:../cli
 
   packages/artifact-fs:
     dependencies:
       '@relay/core':
-        specifier: workspace:*
+        specifier: workspace:@mat973252/relay-core@*
         version: link:../core
 
   packages/cli:
     dependencies:
       '@relay/artifact-fs':
-        specifier: workspace:*
+        specifier: workspace:@mat973252/relay-artifact-fs@*
         version: link:../artifact-fs
       '@relay/core':
-        specifier: workspace:*
+        specifier: workspace:@mat973252/relay-core@*
         version: link:../core
       '@relay/storage-sqlite':
-        specifier: workspace:*
+        specifier: workspace:@mat973252/relay-storage-sqlite@*
         version: link:../storage-sqlite
       yaml:
         specifier: ^2.8.0
@@ -65,19 +65,19 @@ importers:
   packages/mcp:
     dependencies:
       '@relay/core':
-        specifier: workspace:*
+        specifier: workspace:@mat973252/relay-core@*
         version: link:../core
       '@relay/storage-sqlite':
-        specifier: workspace:*
+        specifier: workspace:@mat973252/relay-storage-sqlite@*
         version: link:../storage-sqlite
 
   packages/storage-sqlite:
     dependencies:
       '@relay/core':
-        specifier: workspace:*
+        specifier: workspace:@mat973252/relay-core@*
         version: link:../core
       '@relay/epistemic':
-        specifier: workspace:*
+        specifier: workspace:@mat973252/relay-epistemic@*
         version: link:../epistemic
 
 packages:

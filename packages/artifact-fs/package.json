@@ -1,7 +1,6 @@
 {
-  "name": "@relay/artifact-fs",
+  "name": "@mat973252/relay-artifact-fs",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
   "main": "./dist/src/index.js",
   "types": "./dist/src/index.d.ts",
@@ -15,9 +14,26 @@
     "test": "tsc -b . && node --test \"dist/**/*.test.js\""
   },
   "dependencies": {
-    "@relay/core": "workspace:*"
+    "@relay/core": "workspace:@mat973252/relay-core@*"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.13.0"
+  },
+  "description": "Relay artifact-fs: durable execution continuity for AI agents",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mat973252/Relay.git",
+    "directory": "packages/artifact-fs"
+  },
+  "files": [
+    "dist/src/**/*.js",
+    "dist/src/**/*.d.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
   }
 }
