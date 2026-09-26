@@ -112,3 +112,16 @@ these published packages, not dependencies on somebody else's npm scope.
 
 For the model-free crash demo and synthetic business sandbox, use the
 [source quickstart](../README.md#the-one-sitting-proof-no-pi-no-model-account-no-docker).
+
+## 交接后先解释记录状态（本轮源码分支，尚未发布 npm）
+
+```bash
+relay effects --explain --storage .relay/storage.db
+relay effects --explain --key export-orders:order-123 --storage .relay/storage.db
+```
+
+此模式使用 SQLite readOnly 连接，不执行 schema 迁移、不改 effect 记录、不调用 provider。SQLite 在 WAL 模式下可能创建或使用 `-wal` / `-shm` 协调文件；并不承诺目录完全不变。UNKNOWN / SUBMITTED 明确要求先核对，不能换 operation ID 重提；只有记录的 kind/key 符合 MCP 格式才显示候选参数，使用前仍须核对 journal 归属和相同 provider 配置。提示里的 `relay_reconcile_operation` 是 MCP 工具名，不是 shell 命令。
+
+退出 0 表示成功解释记录，不表示外部操作成功或可以重试；缺失/无法读取数据库、指定 key 不存在、发现损坏行返回 1，参数冲突返回 64。损坏事件检查包含其他 key；告警是所采样 journal 的完整性告警。`--explain` 不与 `--json` / `--history` 组合。普通 effects 输出保持原样。
+
+调研取舍见 [社区调研记录](community-research-2026-09-26.md)。
