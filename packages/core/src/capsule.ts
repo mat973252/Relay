@@ -22,7 +22,12 @@ export interface CapsuleManifest {
   createdAt: number;
   /** Source workspace identifier; portable (relative), never absolute. */
   workspace: string;
-  counts: { effects: number; artifactRecords: number; artifactObjects: number };
+  /**
+   * `effectEvents` is present only when the capsule carries
+   * `effect-events.json` (transition evidence). Its absence means the effect
+   * rows are a snapshot whose history is unavailable, not that nothing happened.
+   */
+  counts: { effects: number; artifactRecords: number; artifactObjects: number; effectEvents?: number };
   files: CapsuleFileEntry[];
   integrity: { algorithm: "sha256" };
 }
@@ -68,7 +73,8 @@ export function validateManifest(manifest: unknown): CapsuleManifest {
     counts === null ||
     typeof counts.effects !== "number" ||
     typeof counts.artifactRecords !== "number" ||
-    typeof counts.artifactObjects !== "number"
+    typeof counts.artifactObjects !== "number" ||
+    (counts.effectEvents !== undefined && typeof counts.effectEvents !== "number")
   ) {
     throw new Error("manifest.counts invalid");
   }

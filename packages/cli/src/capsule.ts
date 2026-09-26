@@ -23,10 +23,12 @@ import { dirname, join } from "node:path";
 import {
   CAPSULE_ROOT,
   RELAY_VERSION,
+  validateEffectEvidence,
   validateManifest,
   type CapsuleFileEntry,
   type CapsuleManifest,
   type EffectRecord,
+  type EffectTransitionEvent,
   type MigrationEvidence,
 } from "@relay/core";
 import { SqliteEffectJournal } from "@relay/storage-sqlite";
@@ -67,11 +69,17 @@ export async function exportCapsule(options: ExportOptions): Promise<ExportResul
     path: join(options.workspace, ".relay", "storage.db"),
   });
   let effects: EffectRecord[];
+  let effectEvents: EffectTransitionEvent[];
   try {
     effects = await journal.list();
+    effectEvents = await journal.listEvents();
   } finally {
     journal.close();
   }
+  // Self-check before export: the journal writes both in one transaction, so
+  // a contradiction here is corruption and must not be shipped as evidence.
+  const evidenceError = validateEffectEvidence(effects, effectEvents);
+  if (evidenceError !== undefined) throw new Error(`refusing to export: ${evidenceError}`);
   const store = await ArtifactStore.open({ root: join(options.workspace, ".relay", "artifacts") });
   // Capability contract auto-detection (round-trip coherence): an imported
   // contract inside .relay wins over a workspace-root authoring copy.
@@ -99,6 +107,9 @@ export async function exportCapsule(options: ExportOptions): Promise<ExportResul
   };
 
   pushEntry(jsonEntry(`${CAPSULE_ROOT}/effects.json`, effects));
+  // Transition evidence travels only when it actually exists; a legacy
+  // journal without events exports a snapshot and nothing is invented.
+  if (effectEvents.length > 0) pushEntry(jsonEntry(`${CAPSULE_ROOT}/effect-events.json`, effectEvents));
   pushEntry(jsonEntry(`${CAPSULE_ROOT}/artifacts/index.json`, artifactRecords));
   for (const digest of [...objectDigests].sort()) {
     const data = await store.content({ digest } as ArtifactRecord);
@@ -130,6 +141,7 @@ export async function exportCapsule(options: ExportOptions): Promise<ExportResul
       effects: effects.length,
       artifactRecords: artifactRecords.length,
       artifactObjects: objectDigests.size,
+      ...(effectEvents.length > 0 ? { effectEvents: effectEvents.length } : {}),
     },
     files: [], // filled after evidence hashing below
     integrity: { algorithm: "sha256" },
@@ -256,6 +268,22 @@ export async function importCapsule(options: ImportOptions): Promise<ImportResul
 
   const effects = safeJsonParse(byPath.get(`${CAPSULE_ROOT}/effects.json`)?.data, "effects.json") as EffectRecord[];
   if (!Array.isArray(effects)) throw new Error("capsule effects.json is not an array");
+  // Optional transition evidence. Present => must be structurally valid and
+  // must agree with effects.json (last event == row status, chained, no
+  // orphans, unique seq) or the whole import is rejected before staging.
+  // Absent => rows import as snapshots with history unavailable.
+  const eventsEntry = byPath.get(`${CAPSULE_ROOT}/effect-events.json`);
+  let effectEvents: EffectTransitionEvent[] = [];
+  if (eventsEntry !== undefined) {
+    const parsed = safeJsonParse(eventsEntry.data, "effect-events.json");
+    if (!Array.isArray(parsed)) throw new Error("capsule effect-events.json is not an array");
+    const evidenceError = validateEffectEvidence(effects, parsed as EffectTransitionEvent[]);
+    if (evidenceError !== undefined) throw new Error(evidenceError);
+    effectEvents = parsed as EffectTransitionEvent[];
+  }
+  if ((manifest.counts.effectEvents !== undefined) !== (eventsEntry !== undefined)) {
+    throw new Error("capsule manifest counts do not match contents: effectEvents");
+  }
   const artifactRecords = safeJsonParse(
     byPath.get(`${CAPSULE_ROOT}/artifacts/index.json`)?.data,
     "artifacts/index.json",
@@ -278,7 +306,8 @@ export async function importCapsule(options: ImportOptions): Promise<ImportResul
   if (
     manifest.counts.effects !== effects.length ||
     manifest.counts.artifactRecords !== artifactRecords.length ||
-    manifest.counts.artifactObjects !== new Set(artifactRecords.map((record) => record.digest)).size
+    manifest.counts.artifactObjects !== new Set(artifactRecords.map((record) => record.digest)).size ||
+    (manifest.counts.effectEvents !== undefined && manifest.counts.effectEvents !== effectEvents.length)
   ) {
     throw new Error("capsule manifest counts do not match contents");
   }
@@ -350,7 +379,7 @@ export async function importCapsule(options: ImportOptions): Promise<ImportResul
     // Journal import: statuses preserved verbatim (UNKNOWN never auto-converts).
     const journal = await SqliteEffectJournal.open({ path: join(stagedRelay, "storage.db") });
     try {
-      await journal.replaceAll(effects);
+      await journal.replaceAll(effects, effectEvents);
     } finally {
       journal.close();
     }

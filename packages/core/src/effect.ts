@@ -58,19 +58,156 @@ export interface EffectRecord {
   updatedAt: number;
 }
 
+/**
+ * Why a latest-state transition was committed. `unknown` is the explicit
+ * label for callers that did not say — it is never inferred.
+ */
+export type EffectTransitionCause = "prepare" | "submit" | "execute" | "reconcile" | "unknown";
+
+/**
+ * One committed latest-state transition (or a repeated UNKNOWN reconcile
+ * observation). Deliberately carries only controlled values: identity,
+ * statuses, cause, order, time. Free-form provider/error text and remote
+ * identifiers live on the latest-state row only and are never appended here
+ * or exported as evidence.
+ */
+export interface EffectTransitionEvent {
+  /** Journal-wide append order; unique and monotonic within one journal. */
+  seq: number;
+  effectId: string;
+  key: string;
+  kind: string;
+  /** undefined for the initial PREPARED insert. */
+  fromStatus: EffectStatus | undefined;
+  toStatus: EffectStatus;
+  cause: EffectTransitionCause;
+  at: number;
+}
+
+/**
+ * observed    — every transition of this record since its insert is recorded.
+ * partial     — the record predates the event table; only later transitions exist.
+ * unavailable — no events at all (legacy row or snapshot-only import).
+ */
+export type EffectHistoryCoverage = "observed" | "partial" | "unavailable";
+
+export interface EffectHistory {
+  /** Latest-state row: the execution authority. */
+  record: EffectRecord;
+  events: EffectTransitionEvent[];
+  coverage: EffectHistoryCoverage;
+}
+
 /** Durable journal port. Implementations must survive process death (fsync-grade commits). */
 export interface EffectJournal {
   insertPrepared(record: EffectRecord): Promise<void>;
-  markSubmitted(id: string, at: number): Promise<void>;
+  markSubmitted(id: string, at: number, cause?: EffectTransitionCause): Promise<void>;
   markConfirmed(
     id: string,
-    patch: { remoteRef: string | undefined; resultJson: string | undefined; at: number },
+    patch: {
+      remoteRef: string | undefined;
+      resultJson: string | undefined;
+      at: number;
+      cause?: EffectTransitionCause;
+    },
   ): Promise<void>;
-  markFailed(id: string, reason: string, at: number): Promise<void>;
-  markUnknown(id: string, reason: string, at: number): Promise<void>;
+  markFailed(id: string, reason: string, at: number, cause?: EffectTransitionCause): Promise<void>;
+  markUnknown(id: string, reason: string, at: number, cause?: EffectTransitionCause): Promise<void>;
   get(id: string): Promise<EffectRecord | undefined>;
   getByKey(key: string): Promise<EffectRecord | undefined>;
   list(): Promise<EffectRecord[]>;
+}
+
+/** Optional read-only evidence port; journals without history simply do not implement it. */
+export interface EffectHistoryReader {
+  listEvents(effectId?: string): Promise<EffectTransitionEvent[]>;
+  listHistory(key?: string): Promise<EffectHistory[]>;
+}
+
+const STATUSES: readonly EffectStatus[] = ["PREPARED", "SUBMITTED", "CONFIRMED", "FAILED", "UNKNOWN"];
+const CAUSES: readonly EffectTransitionCause[] = ["prepare", "submit", "execute", "reconcile", "unknown"];
+const EVENT_FIELDS: ReadonlySet<string> = new Set(["seq", "effectId", "key", "kind", "fromStatus", "toStatus", "cause", "at"]);
+
+export function isEffectStatus(value: unknown): value is EffectStatus {
+  return typeof value === "string" && (STATUSES as readonly string[]).includes(value);
+}
+
+export function isEffectTransitionCause(value: unknown): value is EffectTransitionCause {
+  return typeof value === "string" && (CAUSES as readonly string[]).includes(value);
+}
+
+/**
+ * Structural check of a single event (no cross-record semantics).
+ * Returns an error message or undefined.
+ */
+export function validateEffectTransitionEvent(value: unknown): string | undefined {
+  if (typeof value !== "object" || value === null) return "event is not an object";
+  const e = value as Record<string, unknown>;
+  if (typeof e.seq !== "number" || !Number.isInteger(e.seq) || e.seq < 1) return "seq invalid";
+  if (typeof e.effectId !== "string" || e.effectId.length === 0) return "effectId invalid";
+  if (typeof e.key !== "string" || e.key.length === 0) return "key invalid";
+  if (typeof e.kind !== "string") return "kind invalid";
+  if (e.fromStatus !== undefined && e.fromStatus !== null && !isEffectStatus(e.fromStatus)) return "fromStatus invalid";
+  if (!isEffectStatus(e.toStatus)) return "toStatus invalid";
+  if (!isEffectTransitionCause(e.cause)) return "cause invalid";
+  if (typeof e.at !== "number") return "at invalid";
+  for (const field of Object.keys(e)) {
+    if (!EVENT_FIELDS.has(field)) return `unexpected field ${field}`;
+  }
+  return undefined;
+}
+
+/**
+ * Cross-checks an event stream against the latest-state rows it claims to
+ * describe. Events are evidence, never authority: any contradiction is an
+ * error rather than a reason to change a row. Rules:
+ *  - every event references a known record (same key/kind);
+ *  - seq values are unique;
+ *  - per record, events chain (event[i].fromStatus === event[i-1].toStatus);
+ *  - a record's first event, if it starts from nothing, is PREPARED/prepare;
+ *  - a record that has events ends at the record's current status.
+ * Returns an error message or undefined.
+ */
+export function validateEffectEvidence(
+  records: readonly EffectRecord[],
+  events: readonly EffectTransitionEvent[],
+): string | undefined {
+  const byId = new Map(records.map((r) => [r.id, r]));
+  const seqs = new Set<number>();
+  const perRecord = new Map<string, EffectTransitionEvent[]>();
+  for (const event of events) {
+    const structural = validateEffectTransitionEvent(event);
+    if (structural !== undefined) return `effect evidence invalid: ${structural}`;
+    if (seqs.has(event.seq)) return `effect evidence invalid: duplicate seq ${String(event.seq)}`;
+    seqs.add(event.seq);
+    const record = byId.get(event.effectId);
+    if (record === undefined) return `effect evidence orphan: effect ${event.effectId} has no latest-state row`;
+    if (record.key !== event.key || record.kind !== event.kind) {
+      return `effect evidence contradicts record identity for ${event.effectId}`;
+    }
+    const list = perRecord.get(event.effectId) ?? [];
+    list.push(event);
+    perRecord.set(event.effectId, list);
+  }
+  for (const [id, list] of perRecord) {
+    list.sort((a, b) => a.seq - b.seq);
+    const record = byId.get(id)!;
+    for (let i = 0; i < list.length; i += 1) {
+      const event = list[i]!;
+      if (i === 0) {
+        if (event.fromStatus === undefined && (event.toStatus !== "PREPARED" || event.cause !== "prepare")) {
+          return `effect evidence invalid: first event of ${id} is not a prepare`;
+        }
+      } else if (event.fromStatus !== list[i - 1]!.toStatus) {
+        return `effect evidence invalid: broken chain for ${id} at seq ${String(event.seq)}`;
+      }
+    }
+    const last = list[list.length - 1]!;
+    if (last.toStatus !== record.status) {
+      return `effect evidence contradicts latest state for ${id}: last event ${last.toStatus}, row ${record.status}`;
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -259,6 +396,7 @@ export async function runEffect(input: RunEffectInput): Promise<EffectOutcome> {
           remoteRef: outcome.remoteRef,
           resultJson,
           at: now(),
+          cause: "reconcile",
         });
         const settled = await journal.get(record.id);
         return settled === undefined
@@ -267,11 +405,11 @@ export async function runEffect(input: RunEffectInput): Promise<EffectOutcome> {
       }
       if (outcome.found === false) {
         const reason = `reconcile: remote has no record of effect; replay=${record.replay} forbids automatic re-execution`;
-        await journal.markFailed(record.id, reason, now());
+        await journal.markFailed(record.id, reason, now(), "reconcile");
         return { status: "failed", key: record.key, reason, reconciled: true };
       }
       const reason = `reconcile uncertain: ${outcome.reason}`;
-      await journal.markUnknown(record.id, reason, now());
+      await journal.markUnknown(record.id, reason, now(), "reconcile");
       return { status: "unknown", key: record.key, reason };
     } else {
       throw new Error(`unhandled effect status: ${String((record as { status: string }).status)}`);
@@ -298,7 +436,7 @@ export async function runEffect(input: RunEffectInput): Promise<EffectOutcome> {
     maybeCrash(input, "after-prepared-commit");
   }
 
-  await journal.markSubmitted(record.id, now());
+  await journal.markSubmitted(record.id, now(), "submit");
   maybeCrash(input, "before-execute");
 
   let result: unknown;
@@ -307,11 +445,11 @@ export async function runEffect(input: RunEffectInput): Promise<EffectOutcome> {
   } catch (err) {
     if (err instanceof SimulatedProcessDeath) throw err;
     if (err instanceof AmbiguousEffectError) {
-      await journal.markUnknown(record.id, `ambiguous: ${err.message}`, now());
+      await journal.markUnknown(record.id, `ambiguous: ${err.message}`, now(), "execute");
       return { status: "unknown", key: record.key, reason: `ambiguous: ${err.message}` };
     }
     const message = err instanceof Error ? err.message : String(err);
-    await journal.markFailed(record.id, `failed: ${message}`, now());
+    await journal.markFailed(record.id, `failed: ${message}`, now(), "execute");
     return { status: "failed", key: record.key, reason: `failed: ${message}`, reconciled: false };
   }
 
@@ -320,7 +458,7 @@ export async function runEffect(input: RunEffectInput): Promise<EffectOutcome> {
     resultJson = JSON.stringify(result ?? null);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    await journal.markFailed(record.id, `result not serializable: ${message}`, now());
+    await journal.markFailed(record.id, `result not serializable: ${message}`, now(), "execute");
     return {
       status: "failed",
       key: record.key,
@@ -335,7 +473,7 @@ export async function runEffect(input: RunEffectInput): Promise<EffectOutcome> {
       : undefined;
 
   maybeCrash(input, "after-execute-before-confirm");
-  await journal.markConfirmed(record.id, { remoteRef, resultJson, at: now() });
+  await journal.markConfirmed(record.id, { remoteRef, resultJson, at: now(), cause: "execute" });
   maybeCrash(input, "after-confirm");
 
   const settled = await journal.get(record.id);

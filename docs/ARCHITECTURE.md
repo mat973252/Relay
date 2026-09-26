@@ -69,6 +69,7 @@ It must use public Pi APIs and avoid monkey patches.
 Commands:
 - `relay doctor`
 - `relay effects`
+- `relay effects --history` (read-only latest-state snapshot + observed transition events + coverage)
 - `relay artifacts`
 - `relay lineage <artifact>`
 - `relay export`
@@ -93,6 +94,22 @@ terminal                      |         |          |
 ```
 
 `retry*` is permitted only when the operation is provably safe/idempotent under the provider contract.
+
+### Effect evidence
+
+`relay_effects` holds one latest-state row per key and is the only execution
+authority. `relay_effect_events` is an append-only record of transitions that
+were actually committed (`from -> to`, cause `prepare|submit|execute|reconcile|unknown`,
+timestamp) and nothing else — free-form `reason`/`remoteRef` stay on the
+latest-state row and are never copied into events, `relay effects --history`
+event lines, or `effect-events.json`. Events are written in the same SQLite transaction as the
+row update, so a crash can never leave a row without its event or an event
+without its row. Repeated uncertain reconciles append `UNKNOWN -> UNKNOWN`
+observations. Rejected transitions and deduplicated re-entries append nothing.
+Legacy rows are never backfilled; their history is labeled `unavailable`
+(`partial` once they transition again). Capsules carry `effect-events.json` only
+when events exist; import validates it against `effects.json` and rejects any
+contradiction rather than trusting the stream.
 
 ## Artifact identity
 

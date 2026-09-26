@@ -60,6 +60,29 @@ async function readStatus(dbPath: string): Promise<string | undefined> {
   }
 }
 
+/** Transition history as `from>to:cause` strings; asserts status/history agreement. */
+async function readHistory(dbPath: string): Promise<string[]> {
+  const journal = await SqliteEffectJournal.open({ path: dbPath });
+  try {
+    const histories = await journal.listHistory();
+    if (histories.length === 0) {
+      assert.equal((await journal.listEvents()).length, 0, "orphan events without a latest-state row");
+      return [];
+    }
+    assert.equal(histories.length, 1);
+    const history = histories[0]!;
+    assert.equal(history.coverage, "observed");
+    assert.equal(
+      history.events.at(-1)?.toStatus,
+      history.record.status,
+      "latest-state row and last committed event disagree",
+    );
+    return history.events.map((e) => `${e.fromStatus ?? "-"}>${e.toStatus}:${e.cause}`);
+  } finally {
+    journal.close();
+  }
+}
+
 interface Scenario {
   name: string;
   crash: string;
@@ -71,16 +94,26 @@ interface Scenario {
   finalStatus: string;
   /** Expected provider counter after restart. */
   finalCounter: number;
+  /** Committed transition events observable right after the crash. */
+  historyAfterCrash: string[];
+  /** Committed transition events after the restart child settles. */
+  finalHistory: string[];
 }
 
+const PREPARE = "->PREPARED:prepare";
+const SUBMIT = "PREPARED>SUBMITTED:submit";
+const EXECUTED = "SUBMITTED>CONFIRMED:execute";
+const RECONCILED_FOUND = "SUBMITTED>CONFIRMED:reconcile";
+const RECONCILED_NOT_FOUND = "SUBMITTED>FAILED:reconcile";
+
 const SCENARIOS: Scenario[] = [
-  { name: "1 before PREPARED commit", crash: "before-prepared-commit", statusAfterCrash: undefined, counterAfterCrash: 0, finalStatus: "CONFIRMED", finalCounter: 1 },
-  { name: "2 after PREPARED commit", crash: "after-prepared-commit", statusAfterCrash: "PREPARED", counterAfterCrash: 0, finalStatus: "CONFIRMED", finalCounter: 1 },
-  { name: "3 immediately before POST", crash: "before-execute", statusAfterCrash: "SUBMITTED", counterAfterCrash: 0, finalStatus: "FAILED", finalCounter: 0 },
-  { name: "4 after request leaves client", crash: "after-send", statusAfterCrash: "SUBMITTED", counterAfterCrash: 1, finalStatus: "CONFIRMED", finalCounter: 1 },
-  { name: "5 after remote commit, before response", crash: "after-remote-commit", statusAfterCrash: "SUBMITTED", counterAfterCrash: 1, finalStatus: "CONFIRMED", finalCounter: 1 },
-  { name: "6 after response, before CONFIRMED commit", crash: "after-execute-before-confirm", statusAfterCrash: "SUBMITTED", counterAfterCrash: 1, finalStatus: "CONFIRMED", finalCounter: 1 },
-  { name: "7 after CONFIRMED commit", crash: "after-confirm", statusAfterCrash: "CONFIRMED", counterAfterCrash: 1, finalStatus: "CONFIRMED", finalCounter: 1 },
+  { name: "1 before PREPARED commit", crash: "before-prepared-commit", statusAfterCrash: undefined, counterAfterCrash: 0, finalStatus: "CONFIRMED", finalCounter: 1, historyAfterCrash: [], finalHistory: [PREPARE, SUBMIT, EXECUTED] },
+  { name: "2 after PREPARED commit", crash: "after-prepared-commit", statusAfterCrash: "PREPARED", counterAfterCrash: 0, finalStatus: "CONFIRMED", finalCounter: 1, historyAfterCrash: [PREPARE], finalHistory: [PREPARE, SUBMIT, EXECUTED] },
+  { name: "3 immediately before POST", crash: "before-execute", statusAfterCrash: "SUBMITTED", counterAfterCrash: 0, finalStatus: "FAILED", finalCounter: 0, historyAfterCrash: [PREPARE, SUBMIT], finalHistory: [PREPARE, SUBMIT, RECONCILED_NOT_FOUND] },
+  { name: "4 after request leaves client", crash: "after-send", statusAfterCrash: "SUBMITTED", counterAfterCrash: 1, finalStatus: "CONFIRMED", finalCounter: 1, historyAfterCrash: [PREPARE, SUBMIT], finalHistory: [PREPARE, SUBMIT, RECONCILED_FOUND] },
+  { name: "5 after remote commit, before response", crash: "after-remote-commit", statusAfterCrash: "SUBMITTED", counterAfterCrash: 1, finalStatus: "CONFIRMED", finalCounter: 1, historyAfterCrash: [PREPARE, SUBMIT], finalHistory: [PREPARE, SUBMIT, RECONCILED_FOUND] },
+  { name: "6 after response, before CONFIRMED commit", crash: "after-execute-before-confirm", statusAfterCrash: "SUBMITTED", counterAfterCrash: 1, finalStatus: "CONFIRMED", finalCounter: 1, historyAfterCrash: [PREPARE, SUBMIT], finalHistory: [PREPARE, SUBMIT, RECONCILED_FOUND] },
+  { name: "7 after CONFIRMED commit", crash: "after-confirm", statusAfterCrash: "CONFIRMED", counterAfterCrash: 1, finalStatus: "CONFIRMED", finalCounter: 1, historyAfterCrash: [PREPARE, SUBMIT, EXECUTED], finalHistory: [PREPARE, SUBMIT, EXECUTED] },
 ];
 
 async function settle(provider: CounterProvider, expected: number): Promise<void> {
@@ -110,6 +143,13 @@ describe("M1 crash matrix (SIGKILL at effect boundaries)", () => {
         await settle(provider, scenario.counterAfterCrash);
         assert.equal(provider.state().counter, scenario.counterAfterCrash);
         assert.equal(await readStatus(dbPath), scenario.statusAfterCrash);
+        const historyAfterCrash = await readHistory(dbPath);
+        assert.deepEqual(historyAfterCrash, scenario.historyAfterCrash);
+        // No event may claim a confirmed execution the provider never committed.
+        assert.ok(
+          historyAfterCrash.filter((e) => e.endsWith(">CONFIRMED:execute")).length <= provider.state().counter,
+          "CONFIRMED event without a remote commit",
+        );
 
         // Phase 3: restart (fresh process, same journal, same key).
         const restarted = await runChild(dbPath, provider.baseUrl, "none", key);
@@ -121,6 +161,10 @@ describe("M1 crash matrix (SIGKILL at effect boundaries)", () => {
         const outcome = JSON.parse(restarted.stdout.trim()) as { status: string };
         assert.equal(outcome.status, scenario.finalStatus.toLowerCase());
         assert.equal(await readStatus(dbPath), scenario.finalStatus);
+        // Stored transition order equals what the fake provider actually saw:
+        // a CONFIRMED-by-execute event only when the restart child executed,
+        // a reconcile event only when it observed the provider read-only.
+        assert.deepEqual(await readHistory(dbPath), scenario.finalHistory);
 
         // Phase 4: the invariant — counter never silently exceeds 1.
         assert.equal(provider.state().counter, scenario.finalCounter);
@@ -147,6 +191,8 @@ describe("M1 crash matrix (SIGKILL at effect boundaries)", () => {
         assert.equal(outcome.deduplicated, true);
       }
       assert.equal(provider.state().counter, 1);
+      // Deduplicated re-entries are not transitions: no invented recovery events.
+      assert.deepEqual(await readHistory(dbPath), [PREPARE, SUBMIT, EXECUTED]);
     } finally {
       await provider.stop();
       rmSync(tmp, { recursive: true, force: true });
