@@ -24,10 +24,11 @@ integration, already accepted).
 - Controlled-field validation: `intent_json`, `remote_ref`, `result_json`,
   `reason` are never selected (emitted as `NULL AS …` in the SELECT list).
   Rows/events whose required controlled fields are malformed — unrecognized
-  status/cause, non-integer timestamps, wrong types, `replay ≠ 'never'` —
-  are dropped and counted in `malformedRows`; they never contribute to
-  status counts. A record whose event chain contains a malformed event
-  falls back to `unavailable` coverage rather than trusting a partial chain.
+  status/cause, non-integer or out-of-Date-range (`±8.64e15` ms) timestamps,
+  wrong types, `replay ≠ 'never'` — are dropped and counted in
+  `malformedRows`; they never contribute to status counts. A record whose
+  event chain contains a malformed event falls back to `unavailable`
+  coverage rather than trusting a partial chain.
 - `relay status [--storage PATH] [--output PATH]` in `@relay/cli` +
   `buildStatusDocument` (`packages/cli/src/status.ts`): emits
   `mat-console.status/1` with aggregate evidence only — per-status counts,
@@ -46,7 +47,10 @@ integration, already accepted).
   path is rejected if it resolves to the journal or its `-wal`/`-shm`/
   `-journal` sidecars — by canonical path (`realpath`) and inode identity
   for existing files, covering relative-path, symlink, and hardlink
-  aliases. Refusal exits `2` and writes nothing.
+  aliases. Refusal exits `2` and writes nothing. Sidecars are protected
+  under both the configured `--storage` path and its canonical real path —
+  a symlinked `--storage` cannot hide that `--output` names the real
+  journal's (not-yet-existing) sidecar.
 - The document carries no effect keys, ids, kind, `reason`, `remoteRef`,
   `result_json`, `intent_json`, artifacts, credentials, or Pi session/tool
   ids. Unavailable input still yields a valid document (exit 1), and
@@ -95,11 +99,14 @@ corepack pnpm -r --if-present test
   never appear in output; contract shape (contract id, `generated_at` ISO-Z,
   health enum, no secret-looking keys); usage error → 64.
 - Review-regression tests added: `--output` refusal for identical path,
-  `-wal`/`-shm`/`-journal` sidecar names, symlink and hardlink aliases, and
-  a relative-path alias (exit 2, nothing written, journal byte-identical);
-  malformed-status/non-integer-timestamp rows and malformed events produce
-  a contract-valid document with `malformed-journal-rows` + always-present
-  `safety-gate-closed` attention, no marker leak, no fabricated counts.
+  `-wal`/`-shm`/`-journal` sidecar names, hardlink alias, and a
+  relative-path alias (exit 2, nothing written, journal byte-identical);
+  symlink aliases in a separate test (skipped only on platforms refusing
+  symlink creation), including symlinked `--storage` + real-path sidecar
+  `--output`; malformed-status / TEXT / out-of-Date-range (`1e100` event,
+  `9e15` row) timestamps produce a contract-valid document with
+  `malformed-journal-rows` + always-present `safety-gate-closed`
+  attention, no marker leak, no fabricated counts.
 
 ## Consumer validation
 
@@ -139,7 +146,7 @@ input does not exist at all.
 - `packages/storage-sqlite/test/readonly.test.ts` — 8 new tests
 - `packages/cli/src/status.ts` — `buildStatusDocument` (new)
 - `packages/cli/src/cli.ts` — `relay status` command + usage
-- `packages/cli/test/status.test.ts` — 9 new tests
+- `packages/cli/test/status.test.ts` — 10 new tests
 - `docs/STATUS-EXPORT.md`, `README.md`, `.gitignore`
 - `reports/mat-console-status-2026-09-26/` — labeled fixture artifact
 - `reports/MAT_CONSOLE_STATUS_RESULT.md` — this report

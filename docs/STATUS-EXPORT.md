@@ -35,7 +35,8 @@ An existing `relay_effects`/`relay_effect_events` SQLite journal. The open is
   `result_json`, `reason`) are never selected — they cannot reach the
   document;
 - rows/events with unreadable controlled fields (unrecognized status,
-  non-integer time, malformed shape) are dropped and reported as a
+  non-integer or out-of-Date-range time, malformed shape) are dropped and
+  reported as a
   `malformed-journal-rows` attention item — never sampled as healthy, and a
   record whose event chain contains a malformed event falls back to
   `unavailable` coverage;

@@ -246,7 +246,9 @@ describe("relay status", () => {
       INSERT INTO relay_effect_events VALUES (3,'ok-1','ok/unknown-${MARKER}','k','SUBMITTED','UNKNOWN','execute',3);
       INSERT INTO relay_effects VALUES ('bad-status','bad/1-${MARKER}','k','h','never','never','TOTALLY-BOGUS',NULL,NULL,'${MARKER}',1,2,NULL,3);
       INSERT INTO relay_effects VALUES ('bad-time','bad/2-${MARKER}','k','h','never','never','CONFIRMED',NULL,NULL,NULL,'not-a-number',NULL,NULL,3);
+      INSERT INTO relay_effects VALUES ('bad-range','bad/3-${MARKER}','k','h','never','never','CONFIRMED',NULL,NULL,NULL,1,NULL,NULL,9000000000000000);
       INSERT INTO relay_effect_events VALUES (4,'ok-1','ok/unknown-${MARKER}','k','SUBMITTED','SIDWAYS','execute',4);
+      INSERT INTO relay_effect_events VALUES (5,'ok-1','ok/unknown-${MARKER}','k','UNKNOWN','CONFIRMED','execute',1e100);
     `);
     raw.close();
     const before = sha256(dbPath);
@@ -258,10 +260,12 @@ describe("relay status", () => {
     assertDocumentShape(doc);
     assert.equal(doc.health?.state, "attention");
     const summary = String(doc.health?.summary);
-    // Only the one well-formed row is sampled; the two malformed rows and
-    // the malformed event are counted separately — never as any status.
+    // Only the one well-formed row is sampled; the malformed rows
+    // (bogus status, TEXT timestamp, out-of-Date-range timestamp) and
+    // events (bogus to_status, out-of-Date-range 1e100 time) are counted
+    // separately — never as any status. No exception escapes the export.
     assert.match(summary, /1 effect \(1 unknown\)/);
-    assert.match(summary, /3 malformed rows excluded/);
+    assert.match(summary, /5 malformed rows excluded/);
     const attention = doc.attention ?? [];
     assert.ok(attention.some((a) => a.id === "malformed-journal-rows"));
     assert.ok(attention.some((a) => a.id === "safety-gate-closed"));
@@ -282,10 +286,8 @@ describe("relay status", () => {
       ["shm sidecar", `${dbPath}-shm`],
       ["journal sidecar", `${dbPath}-journal`],
     ];
-    // Symlink and hardlink aliases of the journal itself.
-    const link = join(dir, "alias-link.db");
-    symlinkSync(dbPath, link);
-    collisions.push(["symlink alias", link]);
+    // Hardlink aliases of the journal itself (symlink case runs separately —
+    // some platforms refuse symlink creation for unprivileged users).
     const hard = join(dir, "alias-hard.db");
     linkSync(dbPath, hard);
     collisions.push(["hardlink alias", hard]);
@@ -308,6 +310,33 @@ describe("relay status", () => {
     const ok = runCli(["status", "--storage", dbPath, "--output", join(dir, "relay-status.json")]);
     assert.equal(ok.status, 0);
     assert.equal(existsSync(join(dir, "relay-status.json")), true);
+  });
+
+  it("refuses --output through symlink aliases of the journal", async (t) => {
+    const dir = join(tmp, "collision-link");
+    const dbPath = await seedJournal(dir);
+    const before = sha256(dbPath);
+
+    const link = join(dir, "alias-link.db");
+    try {
+      symlinkSync(dbPath, link);
+    } catch {
+      t.skip("symlink creation is not permitted on this platform");
+      return;
+    }
+
+    // --output equal to the symlink itself.
+    const same = runCli(["status", "--storage", dbPath, "--output", link]);
+    assert.equal(same.status, 2);
+    assert.match(String(same.stderr ?? ""), /refusing to write status output/);
+    assert.equal(sha256(dbPath), before);
+
+    // --storage given as the symlink: an --output naming the real journal's
+    // (not yet existing) sidecar is still refused.
+    const hiddenSidecar = runCli(["status", "--storage", link, "--output", `${dbPath}-wal`]);
+    assert.equal(hiddenSidecar.status, 2);
+    assert.equal(existsSync(`${dbPath}-wal`), false, "sidecar must not be created");
+    assert.equal(sha256(dbPath), before);
   });
 
   it("--output writes the document to a file and keeps stdout clean of payload", async () => {

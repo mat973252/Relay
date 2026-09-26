@@ -480,6 +480,13 @@ const REQUIRED_EVENT_COLUMNS = ["seq", "effect_id", "key", "kind", "from_status"
 const VALID_STATUSES: ReadonlySet<string> = new Set(["PREPARED", "SUBMITTED", "CONFIRMED", "FAILED", "UNKNOWN"]);
 const VALID_CAUSES: ReadonlySet<string> = new Set(["prepare", "submit", "execute", "reconcile", "unknown"]);
 
+/** Max magnitude representable by `new Date(ms)` (§21.4.1.1: ±8.64e15 ms). */
+const MAX_MILLIS = 8_640_000_000_000_000;
+/** Journal times are integer epoch-millis inside Date's supported range. */
+function isJournalTime(v: unknown): v is number {
+  return typeof v === "number" && Number.isSafeInteger(v) && Math.abs(v) <= MAX_MILLIS;
+}
+
 function isValidEffectRow(row: unknown): row is EffectRow {
   const r = row as Partial<EffectRow> | null;
   return (
@@ -493,10 +500,10 @@ function isValidEffectRow(row: unknown): row is EffectRow {
     r.replay === "never" &&
     typeof r.status === "string" &&
     VALID_STATUSES.has(r.status) &&
-    Number.isFinite(r.created_at) &&
-    Number.isFinite(r.updated_at) &&
-    (r.submitted_at === null || r.submitted_at === undefined || Number.isFinite(r.submitted_at)) &&
-    (r.settled_at === null || r.settled_at === undefined || Number.isFinite(r.settled_at))
+    isJournalTime(r.created_at) &&
+    isJournalTime(r.updated_at) &&
+    (r.submitted_at === null || r.submitted_at === undefined || isJournalTime(r.submitted_at)) &&
+    (r.settled_at === null || r.settled_at === undefined || isJournalTime(r.settled_at))
   );
 }
 
@@ -514,7 +521,7 @@ function isValidEventRow(row: unknown): row is EventRow {
     VALID_STATUSES.has(e.to_status) &&
     typeof e.cause === "string" &&
     VALID_CAUSES.has(e.cause) &&
-    Number.isFinite(e.at)
+    isJournalTime(e.at)
   );
 }
 

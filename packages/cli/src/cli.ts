@@ -277,7 +277,13 @@ function sameInode(a: string, b: string): boolean {
  * symlink, and hardlink aliases are all refused.
  */
 function outputCollidesWithJournal(output: string, journalPath: string): boolean {
-  const targets = [journalPath, `${journalPath}-wal`, `${journalPath}-shm`, `${journalPath}-journal`];
+  // Protect sidecar names under BOTH the configured path and the canonical
+  // (realpath) database path: when --storage is itself a symlink alias, the
+  // real journal's sidecars live next to the resolved target and may not
+  // exist yet — comparing only alias-sidecar names would miss them.
+  const journalCanon = canonicalPath(journalPath);
+  const bases = journalCanon === journalPath ? [journalPath] : [journalPath, journalCanon];
+  const targets = bases.flatMap((b) => [b, `${b}-wal`, `${b}-shm`, `${b}-journal`]);
   const canonicalOutput = canonicalPath(output);
   for (const target of targets) {
     if (canonicalPath(target) === canonicalOutput) return true;
