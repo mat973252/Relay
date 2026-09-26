@@ -1,6 +1,6 @@
 {
   "name": "relay-effect-guard",
   "version": "0.1.0",
-  "description": "Non-replayable external actions through the local Relay effect journal: exactly-once execution, read-only reconciliation, crash-safe.",
+  "description": "External actions through the local Relay journal: no silent retry of ambiguous effects, with read-only reconciliation.",
   "author": { "name": "Relay" }
 }
