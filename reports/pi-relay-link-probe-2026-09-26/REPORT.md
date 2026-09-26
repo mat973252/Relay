@@ -22,7 +22,7 @@ and the correlation was verified against real commits on a loopback provider cou
 
 - Node `v24.19.0` (`node --version`), linux x64, `pnpm 10.33.0`.
 - Pi `@earendil-works/pi-coding-agent` **0.87.0** and `@earendil-works/pi-ai` **0.87.1** (from `packages/adapter-pi` devDependencies; `pi.VERSION` observed at runtime).
-- Build: `pnpm install --frozen-lockfile` then `pnpm --filter @relay/cli exec tsc -b` (known project-reference ordering issue documented in `reports/INDEPENDENT_EFFECT_HISTORY_ACCEPTANCE_2026-09-26.md`), then root `pnpm typecheck` passed.
+- Build: `pnpm install --frozen-lockfile`, then `pnpm -r exec tsc -b` (builds each package's project in dependency order), then root `pnpm typecheck` — verified from a clean clone at this branch on Node v24.19.0. Note: the project-reference bootstrap failure is environment-dependent — on this Linux box a direct root `pnpm typecheck` on a fresh clone fails with TS2307 for `@relay/cli/capsule` (recovering after the CLI project is built); on the independent WSL Ubuntu/Node v24.4.1 replay a direct root `pnpm typecheck` succeeded while building the CLI project first hit an `@relay/epistemic` TS2307. `pnpm -r exec tsc -b` sidesteps the ordering issue on both.
 - Run: `RELAY_SOURCE_SHA=$(git rev-parse HEAD) node reports/pi-relay-link-probe-2026-09-26/probe/probe.mjs <outDir>`
 - Probe script SHA-256: `88b3f4d3fb97e90150b9092a04692a1f300f9c7df7236e8f12a11d4674f814b7` (`probe/probe.mjs`).
 
