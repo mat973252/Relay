@@ -64,7 +64,13 @@ export interface EffectRecord {
  */
 export type EffectTransitionCause = "prepare" | "submit" | "execute" | "reconcile" | "unknown";
 
-/** One committed latest-state transition (or a repeated UNKNOWN reconcile observation). */
+/**
+ * One committed latest-state transition (or a repeated UNKNOWN reconcile
+ * observation). Deliberately carries only controlled values: identity,
+ * statuses, cause, order, time. Free-form provider/error text and remote
+ * identifiers live on the latest-state row only and are never appended here
+ * or exported as evidence.
+ */
 export interface EffectTransitionEvent {
   /** Journal-wide append order; unique and monotonic within one journal. */
   seq: number;
@@ -75,8 +81,6 @@ export interface EffectTransitionEvent {
   fromStatus: EffectStatus | undefined;
   toStatus: EffectStatus;
   cause: EffectTransitionCause;
-  reason: string | undefined;
-  remoteRef: string | undefined;
   at: number;
 }
 
@@ -122,6 +126,7 @@ export interface EffectHistoryReader {
 
 const STATUSES: readonly EffectStatus[] = ["PREPARED", "SUBMITTED", "CONFIRMED", "FAILED", "UNKNOWN"];
 const CAUSES: readonly EffectTransitionCause[] = ["prepare", "submit", "execute", "reconcile", "unknown"];
+const EVENT_FIELDS: ReadonlySet<string> = new Set(["seq", "effectId", "key", "kind", "fromStatus", "toStatus", "cause", "at"]);
 
 export function isEffectStatus(value: unknown): value is EffectStatus {
   return typeof value === "string" && (STATUSES as readonly string[]).includes(value);
@@ -145,9 +150,10 @@ export function validateEffectTransitionEvent(value: unknown): string | undefine
   if (e.fromStatus !== undefined && e.fromStatus !== null && !isEffectStatus(e.fromStatus)) return "fromStatus invalid";
   if (!isEffectStatus(e.toStatus)) return "toStatus invalid";
   if (!isEffectTransitionCause(e.cause)) return "cause invalid";
-  if (e.reason !== undefined && e.reason !== null && typeof e.reason !== "string") return "reason invalid";
-  if (e.remoteRef !== undefined && e.remoteRef !== null && typeof e.remoteRef !== "string") return "remoteRef invalid";
   if (typeof e.at !== "number") return "at invalid";
+  for (const field of Object.keys(e)) {
+    if (!EVENT_FIELDS.has(field)) return `unexpected field ${field}`;
+  }
   return undefined;
 }
 

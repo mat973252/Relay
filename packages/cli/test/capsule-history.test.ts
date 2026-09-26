@@ -6,9 +6,11 @@
  * event stream, remains the execution authority.
  */
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { after, describe, it } from "node:test";
 import { exportCapsule, importCapsule } from "../src/capsule.js";
 import { createTar, extractTar, gunzip, gzip, sha256Hex, type TarEntry } from "../src/tar.js";
@@ -165,7 +167,7 @@ describe("capsule effect transition evidence", () => {
     // the record says SUBMITTED. History must not be accepted as authority.
     const forged = [
       ...events,
-      { ...events.at(-1)!, seq: 99, effectId: "s1", key: "op/submitted", fromStatus: "SUBMITTED", toStatus: "CONFIRMED", cause: "reconcile", remoteRef: "fx-forged" },
+      { ...events.at(-1)!, seq: 99, effectId: "s1", key: "op/submitted", fromStatus: "SUBMITTED", toStatus: "CONFIRMED", cause: "reconcile" },
     ];
     await assert.rejects(
       () => importCapsule({ capsule: pack(rewrite(entries, EVENTS_PATH, forged), "forged.tar.gz"), workspace: target }),
@@ -214,5 +216,64 @@ describe("capsule effect transition evidence", () => {
       /effect evidence contradicts/,
     );
     assert.equal(existsSync(join(target, ".relay")), false);
+  });
+
+  it("free-form reason/remoteRef stay on the latest-state row and never enter events, --history, or effect-events.json", async () => {
+    const MARKER = "sk_live_LEAKED_SECRET_MARKER_9f8e7d";
+    const source = join(tmp, "src-secret");
+    const journal = await SqliteEffectJournal.open({ path: join(source, ".relay", "storage.db") });
+    try {
+      await journal.insertPrepared(prepared("u1", "op/unknown", 1));
+      await journal.markSubmitted("u1", 2);
+      await journal.markUnknown("u1", `provider body {"error":"token=${MARKER}"}`, 3, "execute");
+      await journal.markUnknown("u1", `reconcile body {"echo":"${MARKER}"} has no boolean "found" field`, 4, "reconcile");
+      await journal.insertPrepared(prepared("c2", "op/confirmed-ref", 5));
+      await journal.markSubmitted("c2", 6);
+      await journal.markConfirmed("c2", { remoteRef: `cus_${MARKER}`, resultJson: JSON.stringify({ id: MARKER }), at: 7, cause: "execute" });
+      // Latest-state authority unchanged: the row still carries the free-form values.
+      assert.ok((await journal.get("u1"))?.reason?.includes(MARKER));
+      assert.equal((await journal.get("c2"))?.remoteRef, `cus_${MARKER}`);
+      assert.equal(JSON.stringify(await journal.listEvents()).includes(MARKER), false);
+    } finally {
+      journal.close();
+    }
+
+    // relay effects --history (human and JSON event stream).
+    const cliJs = fileURLToPath(new URL("../src/cli.js", import.meta.url));
+    const storage = join(source, ".relay", "storage.db");
+    const human = spawnSync(process.execPath, [cliJs, "effects", "--history", "--storage", storage], { encoding: "utf8" });
+    assert.equal(human.status, 0, human.stderr);
+    assert.match(human.stdout, /UNKNOWN {3}op\/unknown/);
+    assert.match(human.stdout, /#4 UNKNOWN -> UNKNOWN \(reconcile\) @4\n/);
+    assert.equal(human.stdout.includes(MARKER), false);
+    assert.equal(human.stderr.includes(MARKER), false);
+    const asJson = spawnSync(process.execPath, [cliJs, "effects", "--history", "--json", "--storage", storage], { encoding: "utf8" });
+    assert.equal(asJson.status, 0, asJson.stderr);
+    const parsed = JSON.parse(asJson.stdout) as { histories: { events: EffectTransitionEvent[] }[] };
+    assert.equal(parsed.histories.length, 2);
+    assert.equal(JSON.stringify(parsed.histories.map((h) => h.events)).includes(MARKER), false);
+    for (const e of parsed.histories.flatMap((h) => h.events)) {
+      const allowed = new Set(["at", "cause", "effectId", "fromStatus", "key", "kind", "seq", "toStatus"]);
+      assert.deepEqual(Object.keys(e).filter((k) => !allowed.has(k)), []);
+    }
+
+    // Capsule: effect-events.json carries only the controlled fields.
+    const capsule = join(tmp, "secret.tar.gz");
+    await exportCapsule({ workspace: source, output: capsule });
+    const { entries, events } = await readEvents(capsule);
+    assert.equal(events.length, 7);
+    const eventsFile = entries.find((e) => e.name === EVENTS_PATH)!.data.toString("utf8");
+    assert.equal(eventsFile.includes(MARKER), false);
+    assert.equal(eventsFile.includes("reason"), false);
+    assert.equal(eventsFile.includes("remoteRef"), false);
+    // effects.json is the existing latest-state snapshot; it is unchanged by this stage.
+    assert.ok(entries.find((e) => e.name === EFFECTS_PATH)!.data.toString("utf8").includes(MARKER));
+
+    // Import rejects event objects that smuggle free-form fields.
+    const smuggled = events.map((e, i) => (i === 0 ? { ...e, reason: "x" } : e));
+    await assert.rejects(
+      () => importCapsule({ capsule: pack(rewrite(entries, EVENTS_PATH, smuggled), "smuggled.tar.gz"), workspace: join(tmp, "dst-smuggled") }),
+      /unexpected field reason/,
+    );
   });
 });

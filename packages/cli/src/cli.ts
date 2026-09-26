@@ -208,8 +208,7 @@ async function runEffectsCommand(rest: string[], cwd: string): Promise<number> {
         for (const h of histories) {
           process.stdout.write(`${h.record.status.padEnd(9)} ${h.record.key}  ${h.record.id}  history=${h.coverage}\n`);
           for (const e of h.events) {
-            const reason = e.reason === undefined ? "" : `  ${e.reason}`;
-            process.stdout.write(`  #${String(e.seq)} ${e.fromStatus ?? "-"} -> ${e.toStatus} (${e.cause}) @${String(e.at)}${reason}\n`);
+            process.stdout.write(`  #${String(e.seq)} ${e.fromStatus ?? "-"} -> ${e.toStatus} (${e.cause}) @${String(e.at)}\n`);
           }
         }
       }

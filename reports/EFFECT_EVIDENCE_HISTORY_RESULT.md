@@ -11,8 +11,21 @@ acceptance, not an AgentLens change, and not a Pi Run/Step/Recovery store.
 - New append-only table `relay_effect_events` in `@relay/storage-sqlite`
   (`packages/storage-sqlite/src/journal.ts`): `seq` (AUTOINCREMENT), `effect_id`
   (FK to `relay_effects.id`), `key`, `kind`, `from_status` (NULL for the initial
-  insert), `to_status`, `cause`, `reason`, `remote_ref`, `at`, with CHECK
-  constraints on status and cause values and an index on `(effect_id, seq)`.
+  insert), `to_status`, `cause`, `at`, with CHECK constraints on status and
+  cause values and an index on `(effect_id, seq)`. Nothing free-form is stored
+  in events: `reason` and `remote_ref` stay only on the latest-state
+  `relay_effects` row (existing behavior, unchanged). `EffectTransitionEvent`
+  has exactly `seq, effectId, key, kind, fromStatus, toStatus, cause, at`;
+  `validateEffectTransitionEvent` rejects any other field, so capsule import
+  refuses events that smuggle extra text (`unexpected field <name>`).
+- Migration of databases created by the earlier, unmerged revision of this PR
+  (events with `reason`/`remote_ref` columns): `open()` drops those two columns
+  with `ALTER TABLE ... DROP COLUMN` inside one `BEGIN IMMEDIATE` transaction,
+  then runs `VACUUM` so the dropped text does not linger in free pages (the
+  test checks the file bytes after a WAL checkpoint), keeping
+  `seq`/identity/status/cause/`at` intact. Column names come from a
+  fixed internal list, never from data. Databases from `main` (no events table)
+  and fresh databases are unaffected; legacy rows still receive no backfill.
 - Every mutation (`insertPrepared`, `markSubmitted`, `markConfirmed`,
   `markFailed`, `markUnknown`) updates the latest-state row and appends its event
   inside one `BEGIN IMMEDIATE ... COMMIT` transaction. Invalid transitions throw
@@ -67,15 +80,15 @@ Results, identical on Node 24.19.0 and Node 22.23.3:
 | epistemic      |   8   |  8   |  0   |
 | core           |  40   | 40   |  0   |
 | artifact-fs    |  12   | 12   |  0   |
-| storage-sqlite |  26   | 26   |  0   |
-| cli            |  36   | 36   |  0   |
-| mcp            |  49   | 49   |  0   |
+| storage-sqlite |  27   | 27   |  0   |
+| cli            |  37   | 37   |  0   |
+| mcp            |  50   | 50   |  0   |
 | adapter-pi     |   7   |  7   |  0   |
-| **total**      | 178   | 178  |  0   |
+| **total**      | 181   | 181  |  0   |
 
 Targeted regression-first tests added (all included in the counts above):
 
-- `packages/storage-sqlite/test/history.test.ts` (9 tests): full chain,
+- `packages/storage-sqlite/test/history.test.ts` (10 tests): full chain,
   rejected transitions append nothing, `unknown` cause for unannotated callers,
   legacy DB (pre-existing `relay_effects` without events) reports
   `unavailable`/`partial` and is not backfilled, repeated open, `replaceAll`
@@ -83,20 +96,46 @@ Targeted regression-first tests added (all included in the counts above):
   re-entry dedup, and (review fix) an interleaved writer on a second
   connection committing between the row and event reads of `listHistory`,
   unfiltered and key-filtered; the pair must be coherent. Verified to fail
-  against the pre-fix `listHistory` (2/2 failing) and pass after.
+  against the pre-fix `listHistory` (2/2 failing) and pass after. (Review fix
+  2) a database hand-built with the earlier PR's event schema, whose event
+  `reason`/`remote_ref` and latest-state `reason` contain `LEAKED_MARKER`:
+  after open the event table has exactly the eight controlled columns, event
+  output carries no marker, seq order is preserved, the latest-state `reason`
+  still holds the marker, the legacy row stays `unavailable`, and a second
+  open is a no-op.
 - `packages/storage-sqlite/test/crash-matrix.test.ts` (extended): after every
   crash seam the event chain is checked; latest status equals the last event;
   no `execute` confirmation exists without a provider commit; no recovery
   events are invented on restart.
-- `packages/mcp/test/history.test.ts` (3 tests): same-key concurrent submit
+- `packages/mcp/test/history.test.ts` (4 tests): same-key concurrent submit
   yields exactly one `prepare, submit, execute` chain; repeated uncertain
   reconciles append `UNKNOWN -> UNKNOWN` observations without extra provider
   requests; kill/restart then read-only reconcile yields a `reconcile`
-  confirmation and no fabricated events.
-- `packages/cli/test/capsule-history.test.ts` (3 tests): export/import round
+  confirmation and no fabricated events. (Review fix 2) a `127.0.0.1` fake
+  provider answers the POST with a 500 body and reconcile GETs with a
+  `found`-less body, both carrying `sk_live_LEAKED_SECRET_MARKER_9f8e7d`; the
+  real MCP server path (`reconcileAction` interpolating `JSON.stringify(body)`
+  / `err.message` into `reason`) produces `prepare, submit, execute-UNKNOWN,
+  reconcile-UNKNOWN`; the marker is asserted present in the latest-state
+  row's `reason` (unchanged behavior) and absent from every raw
+  `relay_effect_events` row (`SELECT *`) and from `listHistory` events.
+- `packages/cli/test/capsule-history.test.ts` (4 tests): export/import round
   trip preserving `seq`; legacy snapshot-only import; rejection of forged
   completion, broken chain, orphan, duplicate seq, count mismatch, and
-  tampered latest-state contradiction.
+  tampered latest-state contradiction. (Review fix 2) journal seeded with the
+  same marker in `markUnknown` reasons (execute and reconcile causes),
+  `markConfirmed` `remoteRef`, and `resultJson`: marker is absent from
+  `relay effects --history` stdout/stderr, from the `--history --json` event
+  arrays (whose objects carry only the controlled keys), and from the capsule's
+  `effect-events.json` (which also contains neither the string `reason` nor
+  `remoteRef`); it is present in `effects.json` (existing latest-state
+  snapshot, unchanged); an `effect-events.json` with an extra `reason` field is
+  rejected on import with `unexpected field reason`.
+
+Note on `relay effects --history --json`: each history object embeds the
+latest-state `record` (same fields as the existing `relay effects --json`), so
+that mode exposes the row's `reason`/`remoteRef` exactly as before this PR; the
+new event arrays and the human-readable `--history` lines do not.
 
 Crash demo (both Node versions):
 
@@ -161,4 +200,6 @@ identifier reaching the Pi adapter's effect call path.
   `packages/cli/test/capsule-history.test.ts` (new)
 - `reports/EFFECT_EVIDENCE_HISTORY_RESULT.md` (this file)
 
-Final remote SHA: recorded in the PR description after push.
+Final remote SHA: recorded in the PR description after push (review fix 2
+supersedes `40f624e9ab95263506cc09084324b9e7998aff39`, which stored `reason`/
+`remote_ref` in events).

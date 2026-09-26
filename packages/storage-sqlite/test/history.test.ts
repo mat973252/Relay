@@ -9,7 +9,7 @@
  * `unavailable` (or `partial` once new transitions are recorded).
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
@@ -66,14 +66,11 @@ describe("effect transition evidence", () => {
         ["UNKNOWN", "CONFIRMED", "reconcile"],
       ]);
       assert.deepEqual(history.events.map((e) => e.at), [1, 2, 3, 4, 5]);
-      assert.deepEqual(history.events.map((e) => e.reason), [
-        undefined,
-        undefined,
-        "ambiguous: reset",
-        "reconcile uncertain: pending",
-        undefined,
-      ]);
-      assert.equal(history.events[4]?.remoteRef, "fx-1");
+      assert.equal(history.record.reason, "reconcile uncertain: pending", "free-form text stays on the row");
+      assert.equal(history.record.remoteRef, "fx-1");
+      for (const e of history.events) {
+        assert.deepEqual(Object.keys(e).sort(), ["at", "cause", "effectId", "fromStatus", "key", "kind", "seq", "toStatus"]);
+      }
       assert.ok(history.events.every((e) => e.effectId === "e1" && e.key === "k/1" && e.kind === "test/kind"));
       const seqs = history.events.map((e) => e.seq);
       assert.deepEqual([...seqs].sort((a, b) => a - b), seqs, "seq is monotonic");
@@ -173,8 +170,8 @@ describe("effect transition evidence", () => {
       await journal.insertPrepared(prepared("stale", "stale/1", 1));
       const record: EffectRecord = { ...prepared("imp-1", "imp/1", 10), status: "SUBMITTED", submittedAt: 11, updatedAt: 11 };
       const events: EffectTransitionEvent[] = [
-        { seq: 7, effectId: "imp-1", key: "imp/1", kind: "test/kind", fromStatus: undefined, toStatus: "PREPARED", cause: "prepare", reason: undefined, remoteRef: undefined, at: 10 },
-        { seq: 9, effectId: "imp-1", key: "imp/1", kind: "test/kind", fromStatus: "PREPARED", toStatus: "SUBMITTED", cause: "submit", reason: undefined, remoteRef: undefined, at: 11 },
+        { seq: 7, effectId: "imp-1", key: "imp/1", kind: "test/kind", fromStatus: undefined, toStatus: "PREPARED", cause: "prepare", at: 10 },
+        { seq: 9, effectId: "imp-1", key: "imp/1", kind: "test/kind", fromStatus: "PREPARED", toStatus: "SUBMITTED", cause: "submit", at: 11 },
       ];
       await journal.replaceAll([record], events);
       assert.equal((await journal.list()).length, 1);
@@ -252,7 +249,7 @@ describe("effect transition evidence", () => {
         ["UNKNOWN", "UNKNOWN", "reconcile"],
         ["UNKNOWN", "CONFIRMED", "reconcile"],
       ]);
-      assert.equal(h.events.at(-1)?.remoteRef, "fx-r");
+      assert.equal(h.record.remoteRef, "fx-r");
     } finally {
       journal.close();
     }
@@ -307,10 +304,66 @@ describe("effect transition evidence", () => {
       assert.equal(ok.status, "confirmed");
       const [okh] = await journal.listHistory("run/ok");
       assert.deepEqual(shape(okh?.events ?? []).at(-1), ["SUBMITTED", "CONFIRMED", "execute"]);
-      assert.equal(okh?.events.at(-1)?.remoteRef, "fx-ok");
+      assert.equal(okh?.record.remoteRef, "fx-ok");
     } finally {
       journal.close();
     }
+  });
+
+  it("migrates an event table from the earlier PR revision: drops free-form columns, keeps seq/chain, no backfill", async () => {
+    const dbPath = join(tmp, "pr-revision-1.db");
+    const sqlite = await import("node:sqlite");
+    const raw = new sqlite.DatabaseSync(dbPath);
+    raw.exec(`
+      CREATE TABLE relay_effects (
+        id TEXT PRIMARY KEY, key TEXT NOT NULL UNIQUE, kind TEXT NOT NULL, request_hash TEXT NOT NULL,
+        intent_json TEXT, replay TEXT NOT NULL, status TEXT NOT NULL, remote_ref TEXT, result_json TEXT, reason TEXT,
+        created_at INTEGER NOT NULL, submitted_at INTEGER, settled_at INTEGER, updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE relay_effect_events (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT, effect_id TEXT NOT NULL REFERENCES relay_effects(id),
+        key TEXT NOT NULL, kind TEXT NOT NULL, from_status TEXT, to_status TEXT NOT NULL, cause TEXT NOT NULL,
+        reason TEXT, remote_ref TEXT, at INTEGER NOT NULL
+      );
+      INSERT INTO relay_effects VALUES ('m1','mig/1','k','h',NULL,'never','UNKNOWN',NULL,NULL,'ambiguous: token=LEAKED_MARKER',1,2,NULL,3);
+      INSERT INTO relay_effect_events VALUES (1,'m1','mig/1','k',NULL,'PREPARED','prepare',NULL,NULL,1);
+      INSERT INTO relay_effect_events VALUES (2,'m1','mig/1','k','PREPARED','SUBMITTED','submit',NULL,NULL,2);
+      INSERT INTO relay_effect_events VALUES (3,'m1','mig/1','k','SUBMITTED','UNKNOWN','execute','ambiguous: token=LEAKED_MARKER','ref-LEAKED_MARKER',3);
+      INSERT INTO relay_effects VALUES ('m0','mig/legacy','k','h0',NULL,'never','CONFIRMED','fx',NULL,NULL,0,0,0,0);
+    `);
+    raw.close();
+
+    for (let pass = 0; pass < 2; pass += 1) {
+      const journal = await SqliteEffectJournal.open({ path: dbPath });
+      try {
+        const [h] = await journal.listHistory("mig/1");
+        assert.equal(h?.coverage, "observed");
+        assert.deepEqual(h?.events.map((e) => e.seq), pass === 0 ? [1, 2, 3] : [1, 2, 3, 4]);
+        assert.deepEqual(shape(h?.events ?? []).slice(0, 3), [
+          [undefined, "PREPARED", "prepare"],
+          ["PREPARED", "SUBMITTED", "submit"],
+          ["SUBMITTED", "UNKNOWN", "execute"],
+        ]);
+        assert.equal(JSON.stringify(await journal.listEvents()).includes("LEAKED_MARKER"), false);
+        if (pass === 0) assert.equal(h?.record.reason, "ambiguous: token=LEAKED_MARKER", "row is untouched");
+        const [legacy] = await journal.listHistory("mig/legacy");
+        assert.equal(legacy?.coverage, "unavailable");
+        if (pass === 0) await journal.markUnknown("m1", "still ambiguous", 4, "reconcile");
+        await assert.rejects(() => journal.markSubmitted("m1", 6), /invalid effect transition/);
+      } finally {
+        journal.close();
+      }
+    }
+    const check = new sqlite.DatabaseSync(dbPath);
+    const cols = (check.prepare("PRAGMA table_info(relay_effect_events)").all() as { name: string }[]).map((c) => c.name);
+    assert.deepEqual(cols, ["seq", "effect_id", "key", "kind", "from_status", "to_status", "cause", "at"]);
+    check.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    check.close();
+    // Dropped event text is gone from the file itself (not just from the
+    // projection); the latest-state row's current reason is stored as before.
+    const bytes = readFileSync(dbPath, "latin1");
+    assert.equal(bytes.includes("ref-LEAKED_MARKER"), false);
+    assert.ok(bytes.includes("still ambiguous"));
   });
 
   /**

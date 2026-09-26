@@ -62,8 +62,6 @@ CREATE TABLE IF NOT EXISTS relay_effect_events (
   from_status TEXT CHECK (from_status IN ('PREPARED','SUBMITTED','CONFIRMED','FAILED','UNKNOWN')),
   to_status   TEXT NOT NULL CHECK (to_status IN ('PREPARED','SUBMITTED','CONFIRMED','FAILED','UNKNOWN')),
   cause       TEXT NOT NULL CHECK (cause IN ('prepare','submit','execute','reconcile','unknown')),
-  reason      TEXT,
-  remote_ref  TEXT,
   at          INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS relay_effect_events_effect ON relay_effect_events(effect_id, seq);
@@ -77,8 +75,6 @@ interface EventRow {
   from_status: string | null;
   to_status: string;
   cause: string;
-  reason: string | null;
-  remote_ref: string | null;
   at: number;
 }
 
@@ -91,19 +87,17 @@ function toEvent(row: EventRow): EffectTransitionEvent {
     fromStatus: (row.from_status ?? undefined) as EffectStatus | undefined,
     toStatus: row.to_status as EffectStatus,
     cause: row.cause as EffectTransitionCause,
-    reason: row.reason ?? undefined,
-    remoteRef: row.remote_ref ?? undefined,
     at: row.at,
   };
 }
 
 const INSERT_EVENT = `INSERT INTO relay_effect_events
-  (effect_id, key, kind, from_status, to_status, cause, reason, remote_ref, at)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+  (effect_id, key, kind, from_status, to_status, cause, at)
+  VALUES (?, ?, ?, ?, ?, ?, ?)`;
 
 const INSERT_EVENT_WITH_SEQ = `INSERT INTO relay_effect_events
-  (seq, effect_id, key, kind, from_status, to_status, cause, reason, remote_ref, at)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+  (seq, effect_id, key, kind, from_status, to_status, cause, at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?)`;
 
 const INSERT_RECORD = `INSERT INTO relay_effects
   (id, key, kind, request_hash, intent_json, replay, status, remote_ref, result_json, reason,
@@ -127,6 +121,30 @@ function toRecord(row: EffectRow): EffectRecord {
     settledAt: row.settled_at ?? undefined,
     updatedAt: row.updated_at,
   };
+}
+
+/**
+ * Journals created by an earlier revision of the event table carried
+ * free-form `reason`/`remote_ref` columns. Evidence must hold controlled
+ * values only, so those columns (and their retained text) are dropped in
+ * place and the file is vacuumed so the dropped text does not linger in
+ * free pages; seq, identity, statuses, cause and time are untouched.
+ */
+function dropFreeFormEventColumns(db: import("node:sqlite").DatabaseSync): void {
+  const columns = new Set(
+    (db.prepare("PRAGMA table_info(relay_effect_events)").all() as unknown as { name: string }[]).map((c) => c.name),
+  );
+  const extra = ["reason", "remote_ref"].filter((c) => columns.has(c));
+  if (extra.length === 0) return;
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    for (const column of extra) db.exec(`ALTER TABLE relay_effect_events DROP COLUMN ${column}`);
+    db.exec("COMMIT");
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
+  }
+  db.exec("VACUUM");
 }
 
 export interface SqliteEffectJournalOptions {
@@ -157,6 +175,7 @@ export class SqliteEffectJournal implements EffectJournal, EffectHistoryReader {
     } catch {
       // column already present
     }
+    dropFreeFormEventColumns(db);
     return new SqliteEffectJournal(db);
   }
 
@@ -232,8 +251,6 @@ export class SqliteEffectJournal implements EffectJournal, EffectHistoryReader {
           event.fromStatus ?? null,
           event.toStatus,
           event.cause,
-          event.reason ?? null,
-          event.remoteRef ?? null,
           event.at,
         );
       }
@@ -245,13 +262,9 @@ export class SqliteEffectJournal implements EffectJournal, EffectHistoryReader {
     fromStatus: EffectStatus | undefined,
     toStatus: EffectStatus,
     cause: EffectTransitionCause,
-    reason: string | undefined,
-    remoteRef: string | undefined,
     at: number,
   ): void {
-    this.db
-      .prepare(INSERT_EVENT)
-      .run(row.id, row.key, row.kind, fromStatus ?? null, toStatus, cause, reason ?? null, remoteRef ?? null, at);
+    this.db.prepare(INSERT_EVENT).run(row.id, row.key, row.kind, fromStatus ?? null, toStatus, cause, at);
   }
 
   private rowForUpdate(id: string): EffectRow | undefined {
@@ -269,7 +282,6 @@ export class SqliteEffectJournal implements EffectJournal, EffectHistoryReader {
     cause: EffectTransitionCause,
     at: number,
     update: (row: EffectRow) => number,
-    evidence: { reason: string | undefined; remoteRef: string | undefined },
   ): void {
     this.transaction(() => {
       const row = this.rowForUpdate(id);
@@ -277,7 +289,7 @@ export class SqliteEffectJournal implements EffectJournal, EffectHistoryReader {
       if (row === undefined || changes !== 1) {
         throw new Error(`invalid effect transition to ${toStatus}: ${id}`);
       }
-      this.appendEvent(row, row.status as EffectStatus, toStatus, cause, evidence.reason, evidence.remoteRef, at);
+      this.appendEvent(row, row.status as EffectStatus, toStatus, cause, at);
     });
   }
 
@@ -296,8 +308,6 @@ export class SqliteEffectJournal implements EffectJournal, EffectHistoryReader {
         undefined,
         "PREPARED",
         "prepare",
-        undefined,
-        undefined,
         record.createdAt,
       );
     });
@@ -314,7 +324,6 @@ export class SqliteEffectJournal implements EffectJournal, EffectHistoryReader {
         this.db
           .prepare("UPDATE relay_effects SET status = 'SUBMITTED', submitted_at = ?, updated_at = ? WHERE id = ? AND status = 'PREPARED'")
           .run(at, at, id).changes as number,
-      { reason: undefined, remoteRef: undefined },
     );
   }
 
@@ -335,7 +344,6 @@ export class SqliteEffectJournal implements EffectJournal, EffectHistoryReader {
              WHERE id = ? AND status IN ('SUBMITTED', 'UNKNOWN')`,
           )
           .run(patch.remoteRef ?? null, patch.resultJson ?? null, patch.at, patch.at, id).changes as number,
-      { reason: undefined, remoteRef: patch.remoteRef },
     );
   }
 
@@ -349,7 +357,6 @@ export class SqliteEffectJournal implements EffectJournal, EffectHistoryReader {
         this.db
           .prepare("UPDATE relay_effects SET status = 'FAILED', reason = ?, settled_at = ?, updated_at = ? WHERE id = ? AND status IN ('SUBMITTED', 'UNKNOWN')")
           .run(reason, at, at, id).changes as number,
-      { reason, remoteRef: undefined },
     );
   }
 
@@ -363,7 +370,6 @@ export class SqliteEffectJournal implements EffectJournal, EffectHistoryReader {
         this.db
           .prepare("UPDATE relay_effects SET status = 'UNKNOWN', reason = ?, updated_at = ? WHERE id = ? AND status IN ('SUBMITTED', 'UNKNOWN')")
           .run(reason, at, id).changes as number,
-      { reason, remoteRef: undefined },
     );
   }
 

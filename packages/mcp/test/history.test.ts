@@ -7,7 +7,9 @@
  */
 import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
+import { createServer } from "node:http";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { after, describe, it } from "node:test";
 import { SqliteEffectJournal } from "@relay/storage-sqlite";
 import type { EffectHistory } from "@relay/core";
@@ -146,6 +148,55 @@ describe("effect transition evidence via MCP", () => {
       fresh.kill();
       await fresh.exit;
       await provider.stop();
+    }
+  });
+
+  it("provider-controlled response/error text never reaches the append-only event rows", { timeout: 60_000 }, async () => {
+    // Fake provider: commits, then answers the POST with a 500 whose body
+    // carries a secret-looking marker, and answers reconcile GETs with a body
+    // that has no boolean "found" (so reconcileAction interpolates the body
+    // into the free-form `reason`). The marker must land in the latest-state
+    // row (existing behavior, unchanged) but never in relay_effect_events.
+    const MARKER = "sk_live_LEAKED_SECRET_MARKER_9f8e7d";
+    const server = createServer((req, res) => {
+      res.writeHead(req.method === "POST" ? 500 : 200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: `provider said token=${MARKER}`, echo: MARKER }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("no port");
+    const workspace = makeWorkspace(tmp, "hist-secret");
+    writeActions(workspace, `http://127.0.0.1:${String(address.port)}`);
+    const client = await connectClient(workspace);
+    try {
+      const res = await client.call("relay_submit_action", { actionId: ACTION, operationId: "op-h4" });
+      assert.match(res.text, /"status":"unknown"/);
+      const rec = await client.call("relay_reconcile_operation", { actionId: ACTION, operationId: "op-h4" });
+      assert.match(rec.text, /"status":"unknown"/);
+
+      const h = await history(workspace, `${ACTION}:op-h4`);
+      assert.deepEqual(shape(h), ["->PREPARED:prepare", "PREPARED>SUBMITTED:submit", "SUBMITTED>UNKNOWN:execute", "UNKNOWN>UNKNOWN:reconcile"]);
+      // Latest-state authority is unchanged: the marker did reach the row's reason.
+      assert.ok(h.record.reason?.includes(MARKER), "fixture must actually push the marker into the latest-state reason");
+      assert.equal(JSON.stringify(h.events).includes(MARKER), false);
+
+      // Raw table contents, independent of the reader's projection.
+      const db = new DatabaseSync(join(workspace, ".relay", "storage.db"), { readOnly: true });
+      try {
+        const columns = (db.prepare("PRAGMA table_info(relay_effect_events)").all() as unknown as { name: string }[]).map((c) => c.name);
+        assert.deepEqual(columns, ["seq", "effect_id", "key", "kind", "from_status", "to_status", "cause", "at"]);
+        const rows = db.prepare("SELECT * FROM relay_effect_events").all();
+        assert.equal(rows.length, 4);
+        assert.equal(JSON.stringify(rows).includes(MARKER), false);
+        const latest = db.prepare("SELECT reason FROM relay_effects WHERE key = ?").get(`${ACTION}:op-h4`) as { reason: string };
+        assert.ok(latest.reason.includes(MARKER), "latest-state row still holds the free-form reason (unchanged behavior)");
+      } finally {
+        db.close();
+      }
+    } finally {
+      client.kill();
+      await client.exit;
+      await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
 });
