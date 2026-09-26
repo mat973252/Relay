@@ -1,0 +1,330 @@
+{
+  "schema": "relay.business-sandbox-evidence/1",
+  "generatedAt": "2026-09-26T05:19:21.472Z",
+  "node": "v24.13.0",
+  "pi": "0.87.0",
+  "model": {
+    "provider": "aisix",
+    "id": "glm-5.3-flash"
+  },
+  "phases": [
+    {
+      "name": "submit",
+      "sessionId": "01a0dc26-3bed-76a6-ab8c-e721e195d85c",
+      "sessionSha256": "f03211cf5e45f1f305e8977c4417ba5bfd139fbf6f22b1ced519f980dad0c9c5",
+      "calls": [
+        {
+          "toolCallId": "call_16cedb7603a44ea6a470a354",
+          "tool": "relay_list_unresolved",
+          "arguments": {},
+          "result": {
+            "isError": false,
+            "text": "no unresolved operations"
+          }
+        },
+        {
+          "toolCallId": "call_a1c60b762e044348915e4838",
+          "tool": "relay_submit_action",
+          "arguments": {
+            "actionId": "export-orders",
+            "operationId": "monthly-orders-202609"
+          },
+          "result": {
+            "isError": false,
+            "text": "{\"status\":\"unknown\",\"key\":\"export-orders:monthly-orders-202609\",\"reason\":\"ambiguous: request for export-orders gave no definitive answer within 5000ms: fetch failed\"}\nOUTCOME AMBIGUOUS — do NOT resubmit this operationId. Call relay_reconcile_operation { actionId: \"export-orders\", operationId: \"monthly-orders-202609\" } and act on its result."
+          }
+        }
+      ],
+      "usage": [
+        {
+          "input": 107,
+          "output": 390,
+          "cacheRead": 320,
+          "cacheWrite": 0,
+          "reasoning": 367,
+          "totalTokens": 817,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        {
+          "input": 440,
+          "output": 60,
+          "cacheRead": 384,
+          "cacheWrite": 0,
+          "reasoning": 17,
+          "totalTokens": 884,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        {
+          "input": 206,
+          "output": 508,
+          "cacheRead": 768,
+          "cacheWrite": 0,
+          "reasoning": 329,
+          "totalTokens": 1482,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        }
+      ],
+      "history": "submit-history.json",
+      "agentlens": {
+        "runStatus": "passed",
+        "metrics": {
+          "durationMs": 37211,
+          "inputTokens": 753,
+          "outputTokens": 958,
+          "reasoningTokens": 713,
+          "toolCalls": 2,
+          "failedToolCalls": 0
+        },
+        "effectStatus": "UNKNOWN",
+        "matchedCalls": 1,
+        "unassociatedKeys": []
+      }
+    },
+    {
+      "name": "recover",
+      "sessionId": "01a0dc26-cec9-76a6-ab8c-e722bc52695d",
+      "sessionSha256": "a17eae66fded40e473008669d9e95ebf5160ea118d467cacb1041141ae3edfb7",
+      "calls": [
+        {
+          "toolCallId": "call_ed97a42c06c04508b374795c",
+          "tool": "relay_list_unresolved",
+          "arguments": {},
+          "result": {
+            "isError": false,
+            "text": "[{\"key\":\"export-orders:monthly-orders-202609\",\"actionId\":\"export-orders\",\"operationId\":\"monthly-orders-202609\",\"status\":\"UNKNOWN\",\"updatedAt\":1790399911691}]"
+          }
+        },
+        {
+          "toolCallId": "call_c3810f3d035f4df193235e5d",
+          "tool": "relay_reconcile_operation",
+          "arguments": {
+            "actionId": "export-orders",
+            "operationId": "monthly-orders-202609"
+          },
+          "result": {
+            "isError": false,
+            "text": "{\"status\":\"unknown\",\"key\":\"export-orders:monthly-orders-202609\",\"reason\":\"reconcile uncertain: provider status \\\"not_visible\\\" is unresolved (neither executed nor proven not-executed)\"}"
+          }
+        }
+      ],
+      "usage": [
+        {
+          "input": 100,
+          "output": 104,
+          "cacheRead": 320,
+          "cacheWrite": 0,
+          "reasoning": 96,
+          "totalTokens": 524,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        {
+          "input": 188,
+          "output": 96,
+          "cacheRead": 384,
+          "cacheWrite": 0,
+          "reasoning": 24,
+          "totalTokens": 668,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        {
+          "input": 203,
+          "output": 145,
+          "cacheRead": 512,
+          "cacheWrite": 0,
+          "reasoning": 45,
+          "totalTokens": 860,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        }
+      ],
+      "history": "recover-history.json",
+      "agentlens": {
+        "runStatus": "passed",
+        "metrics": {
+          "durationMs": 18314,
+          "inputTokens": 491,
+          "outputTokens": 345,
+          "reasoningTokens": 165,
+          "toolCalls": 2,
+          "failedToolCalls": 0
+        },
+        "effectStatus": "UNKNOWN",
+        "matchedCalls": 0,
+        "unassociatedKeys": [
+          "export-orders:monthly-orders-202609"
+        ]
+      }
+    },
+    {
+      "name": "confirm",
+      "sessionId": "01a0dc27-1705-76a6-ab8c-e7251121c074",
+      "sessionSha256": "09c9ec7e1205d18b3bc830ee71078c03deecb7d49582bfcec1c18b91e36ad2c9",
+      "calls": [
+        {
+          "toolCallId": "call_8e9a8617bd2248d5aa6495e4",
+          "tool": "relay_list_unresolved",
+          "arguments": {},
+          "result": {
+            "isError": false,
+            "text": "[{\"key\":\"export-orders:monthly-orders-202609\",\"actionId\":\"export-orders\",\"operationId\":\"monthly-orders-202609\",\"status\":\"UNKNOWN\",\"updatedAt\":1790399944407}]"
+          }
+        },
+        {
+          "toolCallId": "call_48f631fffcbc4e3a91a0dd43",
+          "tool": "relay_reconcile_operation",
+          "arguments": {
+            "actionId": "export-orders",
+            "operationId": "monthly-orders-202609"
+          },
+          "result": {
+            "isError": false,
+            "text": "{\"status\":\"confirmed\",\"key\":\"export-orders:monthly-orders-202609\",\"remoteRef\":\"monthly-orders-202609\",\"result\":{\"status\":\"complete\",\"operationId\":\"monthly-orders-202609\",\"artifact\":\"monthly-orders-202609.csv\",\"sha256\":\"ceda8e3103fec632f04bcc74374685be778ac20cd02adebfa0b9ad2a43881c90\"},\"deduplicated\":false,\"reconciled\":true}"
+          }
+        }
+      ],
+      "usage": [
+        {
+          "input": 93,
+          "output": 159,
+          "cacheRead": 320,
+          "cacheWrite": 0,
+          "reasoning": 143,
+          "totalTokens": 572,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        {
+          "input": 237,
+          "output": 122,
+          "cacheRead": 384,
+          "cacheWrite": 0,
+          "reasoning": 48,
+          "totalTokens": 743,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        {
+          "input": 277,
+          "output": 195,
+          "cacheRead": 576,
+          "cacheWrite": 0,
+          "reasoning": 49,
+          "totalTokens": 1048,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        }
+      ],
+      "history": "confirm-history.json",
+      "agentlens": {
+        "runStatus": "passed",
+        "metrics": {
+          "durationMs": 16763,
+          "inputTokens": 607,
+          "outputTokens": 476,
+          "reasoningTokens": 240,
+          "toolCalls": 2,
+          "failedToolCalls": 0
+        },
+        "effectStatus": "CONFIRMED",
+        "matchedCalls": 0,
+        "unassociatedKeys": [
+          "export-orders:monthly-orders-202609"
+        ]
+      }
+    }
+  ],
+  "business": {
+    "jobs": [
+      {
+        "operation_id": "monthly-orders-202609",
+        "status": "complete",
+        "digest": "ceda8e3103fec632f04bcc74374685be778ac20cd02adebfa0b9ad2a43881c90"
+      }
+    ],
+    "requests": [
+      {
+        "method": "POST",
+        "operation_id": "monthly-orders-202609"
+      },
+      {
+        "method": "GET",
+        "operation_id": "monthly-orders-202609"
+      },
+      {
+        "method": "GET",
+        "operation_id": "monthly-orders-202609"
+      },
+      {
+        "method": "GET",
+        "operation_id": "monthly-orders-202609"
+      }
+    ]
+  },
+  "assertions": {
+    "singlePost": true,
+    "singleJob": true,
+    "correctArtifact": true,
+    "recoveredOriginalIdentity": true,
+    "terminalOnlyAfterCompletion": true
+  },
+  "artifact": {
+    "file": "orders.csv",
+    "sha256": "ceda8e3103fec632f04bcc74374685be778ac20cd02adebfa0b9ad2a43881c90"
+  },
+  "boundaries": [
+    "Synthetic orders, loopback provider, real AISIX model",
+    "Provider-process worker with explicit IPC fault controls",
+    "AgentLens matches submit calls only; reconcile-only sessions retain unassociated sidecar evidence",
+    "Not third-party production-provider acceptance"
+  ]
+}
