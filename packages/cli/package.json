@@ -1,7 +1,6 @@
 {
-  "name": "@relay/cli",
+  "name": "@mat973252/relay-cli",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
   "bin": {
     "relay": "./dist/src/cli.js"
@@ -20,12 +19,29 @@
     "test": "tsc -b . && node --test \"dist/**/*.test.js\""
   },
   "dependencies": {
-    "@relay/artifact-fs": "workspace:*",
-    "@relay/core": "workspace:*",
-    "@relay/storage-sqlite": "workspace:*",
+    "@relay/artifact-fs": "workspace:@mat973252/relay-artifact-fs@*",
+    "@relay/core": "workspace:@mat973252/relay-core@*",
+    "@relay/storage-sqlite": "workspace:@mat973252/relay-storage-sqlite@*",
     "yaml": "^2.8.0"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.13.0"
+  },
+  "description": "Relay cli: durable execution continuity for AI agents",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mat973252/Relay.git",
+    "directory": "packages/cli"
+  },
+  "files": [
+    "dist/src/**/*.js",
+    "dist/src/**/*.d.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
   }
 }

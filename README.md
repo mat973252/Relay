@@ -39,8 +39,15 @@ No Java/Go/Rust in v0.1.
 
 ## Local workspace
 
-The first release is **v0.1.0**, distributed as source under the [MIT license](LICENSE).
-Use Node 22 or 24 and pnpm 10.33.0. The workspace packages are not published to npm.
+The first release is **v0.1.0**, under the [MIT license](LICENSE).
+For npm installation and MCP configuration, see the [usage guide](docs/NPM-USAGE.md):
+
+```sh
+npm install -g @mat973252/relay-cli@0.1.0 @mat973252/relay-mcp@0.1.0
+relay --help
+```
+
+Use Node 24 or Node 22.13+. To build the source, use pnpm 10.33.0:
 
 ```bash
 git clone --branch v0.1.0 https://github.com/mat973252/Relay.git

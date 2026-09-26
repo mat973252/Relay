@@ -13,7 +13,7 @@
  * Prints one JSON line with the EffectOutcome (when it survives) and exits 0.
  */
 import { runEffect, type CrashPoint, type ReconcileOutcome, type RunEffectInput } from "@relay/core";
-import { SqliteEffectJournal } from "@relay/storage-sqlite";
+import { SqliteEffectJournal } from "../../src/index.js";
 
 function requireArg(value: string | undefined, name: string): string {
   if (value === undefined) {
