@@ -1,0 +1,3 @@
+# Preserve the bytes of recorded sandbox evidence on Windows checkouts.
+reports/business-sandbox-2026-09-26/*.csv text eol=lf
+reports/business-sandbox-2026-09-26/*.json text eol=lf

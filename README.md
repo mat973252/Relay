@@ -70,6 +70,24 @@ submit-request count at exactly 1. Real guarantee: **no silent retry of an ambig
 stronger guarantees need downstream idempotency or a reliable reconciliation
 query.
 
+## 订单报表业务沙箱
+
+业务服务在独立进程中把合成订单的导出任务写入 SQLite，由后台 worker
+生成 CSV。验收覆盖接单后断线、Relay 强制终止、服务双重启、查询暂不可见、
+处理中、完成校验、拒绝和两个独立请求；同时检查任务数与 POST 请求数。
+
+```powershell
+corepack pnpm typecheck
+node --test packages/mcp/dist/test/business-sandbox.test.js
+# 可选：使用已有 Pi AISIX 配置，真实模型调用只接触合成业务数据
+node examples/business-sandbox.mjs glm-5.3-flash
+```
+
+真实模型验收输出独立会话、各阶段 Relay 历史快照和 CSV 的证据目录。
+没有 AISIX 配置时仍可运行上面的确定性业务测试。
+范围、结果和已发现的模型兼容限制见
+[业务沙箱验收](reports/BUSINESS_SANDBOX_ACCEPTANCE_2026-09-26.md)。
+
 ## MCP entry points (Claude Code, Codex, Pi)
 
 `packages/mcp` exposes the same effect engine as a local stdio MCP server:
