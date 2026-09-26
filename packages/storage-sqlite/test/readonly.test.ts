@@ -74,10 +74,26 @@ describe("SqliteEffectJournalReader", () => {
       assert.ok(r1);
       assert.equal(r1.coverage, "observed");
       assert.equal(r1.record.status, "UNKNOWN");
-      assert.deepEqual(
-        histories.map((h) => ({ record: h.record, coverage: h.coverage, events: h.events })),
-        expected.map((h) => ({ record: h.record, coverage: h.coverage, events: h.events })),
-      );
+      // The reader is an evidence projection: identity/status/timestamps and
+      // events match the writer exactly; free-form columns stay NULL.
+      const project = (list: typeof histories) =>
+        list.map((h) => ({
+          id: h.record.id,
+          key: h.record.key,
+          kind: h.record.kind,
+          status: h.record.status,
+          createdAt: h.record.createdAt,
+          submittedAt: h.record.submittedAt,
+          settledAt: h.record.settledAt,
+          updatedAt: h.record.updatedAt,
+          coverage: h.coverage,
+          events: h.events,
+        }));
+      assert.deepEqual(project(histories), project(expected));
+      // The writer recorded free-form text; the reader never selects it.
+      const writerR1 = expected.find((h) => h.record.id === "r1");
+      assert.equal(writerR1?.record.reason, "ambiguous");
+      assert.equal(r1.record.reason, undefined, "free-form reason is never read");
       const filtered = await reader.listHistory("ro/2");
       assert.equal(filtered.length, 1);
       assert.equal(filtered[0]?.record.status, "PREPARED");
@@ -187,6 +203,48 @@ describe("SqliteEffectJournalReader", () => {
     const notRelayBefore = sha256(notRelay);
     await assert.rejects(() => SqliteEffectJournalReader.open({ path: notRelay }), /not a Relay effect journal/);
     assert.equal(sha256(notRelay), notRelayBefore);
+  });
+
+  it("malformed rows/events are dropped and counted; broken event chains lose coverage", async () => {
+    const dbPath = join(tmp, "malformed-ro.db");
+    const sqlite = await import("node:sqlite");
+    const raw = new sqlite.DatabaseSync(dbPath);
+    raw.exec(`
+      CREATE TABLE relay_effects (
+        id TEXT PRIMARY KEY, key TEXT NOT NULL UNIQUE, kind TEXT NOT NULL, request_hash TEXT NOT NULL,
+        intent_json TEXT, replay TEXT NOT NULL, status TEXT NOT NULL, remote_ref TEXT, result_json TEXT, reason TEXT,
+        created_at INTEGER NOT NULL, submitted_at INTEGER, settled_at INTEGER, updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE relay_effect_events (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT, effect_id TEXT NOT NULL REFERENCES relay_effects(id),
+        key TEXT NOT NULL, kind TEXT NOT NULL, from_status TEXT, to_status TEXT NOT NULL, cause TEXT NOT NULL,
+        at INTEGER NOT NULL
+      );
+      INSERT INTO relay_effects VALUES ('ok-1','ok/1','k','h',NULL,'never','UNKNOWN',NULL,NULL,'r',1,2,NULL,3);
+      INSERT INTO relay_effect_events VALUES (1,'ok-1','ok/1','k',NULL,'PREPARED','prepare',1);
+      INSERT INTO relay_effect_events VALUES (2,'ok-1','ok/1','k','PREPARED','SUBMITTED','submit',2);
+      INSERT INTO relay_effect_events VALUES (3,'ok-1','ok/1','k','SUBMITTED','SIDWAYS','execute',3);
+      INSERT INTO relay_effects VALUES ('bad-1','bad/1','k','h',NULL,'never','NOPE',NULL,NULL,NULL,1,NULL,NULL,1);
+      INSERT INTO relay_effects VALUES ('bad-2','bad/2','k','h',NULL,'never','CONFIRMED',NULL,NULL,NULL,'text-time',NULL,NULL,1);
+    `);
+    raw.close();
+    const before = sha256(dbPath);
+
+    const reader = await SqliteEffectJournalReader.open({ path: dbPath });
+    try {
+      const result = await reader.readJournal();
+      assert.equal(result.malformedRows, 3, "2 bad rows + 1 bad event");
+      assert.equal(result.histories.length, 1, "malformed rows never sampled");
+      const [h] = result.histories;
+      assert.ok(h);
+      assert.equal(h.record.id, "ok-1");
+      // A malformed event in the chain makes the chain untrusted -> unavailable.
+      assert.equal(h.coverage, "unavailable");
+      assert.equal(h.events.length, 2);
+    } finally {
+      reader.close();
+    }
+    assert.equal(sha256(dbPath), before);
   });
 
   it("returns a coherent row/event snapshot under an interleaved writer", async () => {

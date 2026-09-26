@@ -11,6 +11,7 @@ import type { ProbeOutcome } from "@relay/core";
 export {
   SqliteEffectJournal,
   SqliteEffectJournalReader,
+  type JournalReadResult,
   type SqliteEffectJournalOptions,
 } from "./journal.js";
 

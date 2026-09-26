@@ -1,6 +1,6 @@
 {
   "contract": "mat-console.status/1",
-  "generated_at": "2026-09-26T02:06:39.849Z",
+  "generated_at": "2026-09-26T02:23:37.463Z",
   "ttl_seconds": 300,
   "project": {
     "id": "relay",
@@ -12,6 +12,13 @@
     "evidence_url": "https://github.com/mat973252/mat-console/blob/main/docs/protocol-v1.md"
   },
   "attention": [
+    {
+      "id": "safety-gate-closed",
+      "title": "Relay safety gate remains CLOSED",
+      "detail": "This document reports a local journal sample only. The overall Relay safety gate is closed until a concrete provider completion/reconcile contract and trusted workspace boundary are verified — see the gate review.",
+      "severity": "info",
+      "evidence_url": "https://github.com/mat973252/Relay/blob/main/reports/INDEPENDENT_RELAY_GATE_REVIEW_2026-09-25.md"
+    },
     {
       "id": "unresolved-unknown-effects",
       "title": "1 effect unresolved in UNKNOWN",

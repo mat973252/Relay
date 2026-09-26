@@ -448,9 +448,13 @@ export class SqliteEffectJournal implements EffectJournal, EffectHistoryReader {
 //
 // Missing files are never created. A database without `relay_effects` is not
 // a Relay journal and is rejected rather than treated as empty. Optional
-// columns absent in legacy schemas (e.g. `intent_json`) read as NULL; a
+// columns absent in legacy schemas (e.g. `submitted_at`) read as NULL; a
 // missing `relay_effect_events` table simply yields `unavailable` history —
-// nothing is backfilled or inferred.
+// nothing is backfilled or inferred. Provider-controlled free-form columns
+// (`intent_json`, `remote_ref`, `result_json`, `reason`) are never selected,
+// so they cannot reach an exported document. Rows whose controlled fields
+// are unreadable are dropped and counted as malformed, never sampled as
+// healthy.
 // ---------------------------------------------------------------------------
 
 const REQUIRED_EFFECT_COLUMNS = [
@@ -463,15 +467,67 @@ const REQUIRED_EFFECT_COLUMNS = [
   "created_at",
   "updated_at",
 ] as const;
-const OPTIONAL_EFFECT_COLUMNS = [
-  "intent_json",
-  "remote_ref",
-  "result_json",
-  "reason",
-  "submitted_at",
-  "settled_at",
-] as const;
+/** Non-free-form columns read when present; everything else stays NULL. */
+const OPTIONAL_EFFECT_COLUMNS = ["submitted_at", "settled_at"] as const;
+/**
+ * Provider-controlled / free-form text is never selected by the read path:
+ * aggregates need none of it, and not reading it removes any chance of it
+ * reaching an exported document.
+ */
+const NEVER_SELECTED_COLUMNS = ["intent_json", "remote_ref", "result_json", "reason"] as const;
 const REQUIRED_EVENT_COLUMNS = ["seq", "effect_id", "key", "kind", "from_status", "to_status", "cause", "at"] as const;
+
+const VALID_STATUSES: ReadonlySet<string> = new Set(["PREPARED", "SUBMITTED", "CONFIRMED", "FAILED", "UNKNOWN"]);
+const VALID_CAUSES: ReadonlySet<string> = new Set(["prepare", "submit", "execute", "reconcile", "unknown"]);
+
+function isValidEffectRow(row: unknown): row is EffectRow {
+  const r = row as Partial<EffectRow> | null;
+  return (
+    r !== null &&
+    typeof r === "object" &&
+    typeof r.id === "string" &&
+    r.id !== "" &&
+    typeof r.key === "string" &&
+    typeof r.kind === "string" &&
+    typeof r.request_hash === "string" &&
+    r.replay === "never" &&
+    typeof r.status === "string" &&
+    VALID_STATUSES.has(r.status) &&
+    Number.isFinite(r.created_at) &&
+    Number.isFinite(r.updated_at) &&
+    (r.submitted_at === null || r.submitted_at === undefined || Number.isFinite(r.submitted_at)) &&
+    (r.settled_at === null || r.settled_at === undefined || Number.isFinite(r.settled_at))
+  );
+}
+
+function isValidEventRow(row: unknown): row is EventRow {
+  const e = row as Partial<EventRow> | null;
+  return (
+    e !== null &&
+    typeof e === "object" &&
+    Number.isInteger(e.seq) &&
+    typeof e.effect_id === "string" &&
+    typeof e.key === "string" &&
+    typeof e.kind === "string" &&
+    (e.from_status === null || (typeof e.from_status === "string" && VALID_STATUSES.has(e.from_status))) &&
+    typeof e.to_status === "string" &&
+    VALID_STATUSES.has(e.to_status) &&
+    typeof e.cause === "string" &&
+    VALID_CAUSES.has(e.cause) &&
+    Number.isFinite(e.at)
+  );
+}
+
+export interface JournalReadResult {
+  histories: EffectHistory[];
+  /**
+   * Rows/events dropped because their controlled fields were unreadable
+   * (unrecognized status, non-integer time, malformed shape). They are
+   * excluded from every count — never treated as healthy — and a record
+   * with any malformed event keeps no usable chain: coverage `unavailable`.
+   */
+  malformedRows: number;
+}
 
 export class SqliteEffectJournalReader implements EffectHistoryReader {
   private readonly db: import("node:sqlite").DatabaseSync;
@@ -518,7 +574,7 @@ export class SqliteEffectJournalReader implements EffectHistoryReader {
           throw new Error(`relay_effects schema at ${options.path} is missing required column ${column}`);
         }
       }
-      const effectSelect = `SELECT ${selectList(REQUIRED_EFFECT_COLUMNS, OPTIONAL_EFFECT_COLUMNS, effectColumns)} FROM relay_effects`;
+      const effectSelect = `SELECT ${selectList(REQUIRED_EFFECT_COLUMNS, OPTIONAL_EFFECT_COLUMNS, NEVER_SELECTED_COLUMNS, effectColumns)} FROM relay_effects`;
       let eventSelect: string | undefined;
       if (tables.has("relay_effect_events")) {
         const eventColumns = columnNames(db, "relay_effect_events");
@@ -547,49 +603,78 @@ export class SqliteEffectJournalReader implements EffectHistoryReader {
     }
   }
 
-  private readRecords(key?: string): EffectRecord[] {
-    const rows =
+  private readRawRecords(key?: string): unknown[] {
+    return (
       key === undefined
         ? this.db.prepare(`${this.effectSelect} ORDER BY created_at, id`).all()
-        : this.db.prepare(`${this.effectSelect} WHERE key = ?`).all(key);
-    return (rows as unknown as EffectRow[]).map(toRecord);
+        : this.db.prepare(`${this.effectSelect} WHERE key = ?`).all(key)
+    ) as unknown[];
   }
 
-  private readEvents(effectId?: string): EffectTransitionEvent[] {
+  private readRawEvents(effectId?: string): unknown[] {
     if (this.eventSelect === undefined) return [];
-    const rows =
+    return (
       effectId === undefined
         ? this.db.prepare(`${this.eventSelect} ORDER BY seq`).all()
-        : this.db.prepare(`${this.eventSelect} WHERE effect_id = ? ORDER BY seq`).all(effectId);
-    return (rows as unknown as EventRow[]).map(toEvent);
+        : this.db.prepare(`${this.eventSelect} WHERE effect_id = ? ORDER BY seq`).all(effectId)
+    ) as unknown[];
+  }
+
+  /**
+   * One consistent snapshot of rows + events with validation: malformed
+   * records are dropped and counted, malformed events are dropped and their
+   * record's coverage falls back to `unavailable`. Never infers history.
+   */
+  async readJournal(key?: string): Promise<JournalReadResult> {
+    const { rawRecords, rawEvents } = this.snapshot(() => ({
+      rawRecords: this.readRawRecords(key),
+      rawEvents: this.readRawEvents(),
+    }));
+    let malformedRows = 0;
+    const records: EffectRecord[] = [];
+    for (const row of rawRecords) {
+      if (isValidEffectRow(row)) records.push(toRecord(row));
+      else malformedRows += 1;
+    }
+    const byEffect = new Map<string, EffectTransitionEvent[]>();
+    const brokenChains = new Set<string>();
+    for (const raw of rawEvents) {
+      if (isValidEventRow(raw)) {
+        const event = toEvent(raw);
+        const list = byEffect.get(event.effectId) ?? [];
+        list.push(event);
+        byEffect.set(event.effectId, list);
+      } else {
+        malformedRows += 1;
+        const effectId = (raw as { effect_id?: unknown } | null)?.effect_id;
+        if (typeof effectId === "string") brokenChains.add(effectId);
+      }
+    }
+    const histories = records.map((record) => {
+      const own = byEffect.get(record.id) ?? [];
+      const coverage: EffectHistory["coverage"] = brokenChains.has(record.id)
+        ? "unavailable"
+        : own.length === 0
+          ? "unavailable"
+          : own[0]!.fromStatus === undefined
+            ? "observed"
+            : "partial";
+      return { record, events: own, coverage };
+    });
+    return { histories, malformedRows };
   }
 
   /** Same coverage semantics as the writable journal: observed / partial / unavailable, never inferred. */
   async listHistory(key?: string): Promise<EffectHistory[]> {
-    const { records, events } = this.snapshot(() => ({
-      records: this.readRecords(key),
-      events: this.readEvents(),
-    }));
-    const byEffect = new Map<string, EffectTransitionEvent[]>();
-    for (const event of events) {
-      const list = byEffect.get(event.effectId) ?? [];
-      list.push(event);
-      byEffect.set(event.effectId, list);
-    }
-    return records.map((record) => {
-      const own = byEffect.get(record.id) ?? [];
-      const coverage: EffectHistory["coverage"] =
-        own.length === 0 ? "unavailable" : own[0]!.fromStatus === undefined ? "observed" : "partial";
-      return { record, events: own, coverage };
-    });
+    return (await this.readJournal(key)).histories;
   }
 
   async listEvents(effectId?: string): Promise<EffectTransitionEvent[]> {
-    return this.snapshot(() => this.readEvents(effectId));
+    return this.snapshot(() => this.readRawEvents(effectId).filter(isValidEventRow).map(toEvent));
   }
 
   async list(): Promise<EffectRecord[]> {
-    return this.snapshot(() => this.readRecords());
+    return this.snapshot(() => this.readRawRecords().filter(isValidEffectRow).map(toRecord));
   }
 }
 
@@ -604,9 +689,10 @@ function columnNames(db: import("node:sqlite").DatabaseSync, table: string): Set
 function selectList(
   required: readonly string[],
   optional: readonly string[],
+  neverSelected: readonly string[],
   present: ReadonlySet<string>,
 ): string {
-  const missingOptional = optional.filter((c) => !present.has(c));
   const selected = [...required, ...optional.filter((c) => present.has(c))];
-  return [...selected, ...missingOptional.map((c) => `NULL AS ${c}`)].join(", ");
+  const nulled = [...optional.filter((c) => !present.has(c)), ...neverSelected];
+  return [...selected, ...nulled.map((c) => `NULL AS ${c}`)].join(", ");
 }

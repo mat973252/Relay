@@ -12,7 +12,8 @@
  */
 import { spawnSync } from "node:child_process";
 import { writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { existsSync, realpathSync, statSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   RELAY_VERSION,
@@ -57,7 +58,8 @@ status emits a mat-console.status/1 JSON document from a read-only open of the
 effect journal (no directory/DB creation, no schema migration, no pragma
 writes). With --output the document is written to PATH; otherwise to stdout.
 exit codes: 0 journal sampled | 1 journal unavailable (document still emitted)
-| 2 output write failed | 64 usage error
+| 2 output write failed or refused (--output must never be the journal or
+its -wal/-shm/-journal sidecars) | 64 usage error
 `;
 
 interface DoctorArgs {
@@ -240,6 +242,50 @@ async function runEffectsCommand(rest: string[], cwd: string): Promise<number> {
   }
 }
 
+/**
+ * Canonicalized identity for a path that may not exist: symlinks are
+ * resolved when possible, otherwise the parent directory's real path is
+ * combined with the entry name.
+ */
+function canonicalPath(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    try {
+      return join(realpathSync(dirname(path)), basename(path));
+    } catch {
+      return resolve(path);
+    }
+  }
+}
+
+/** dev+ino identity — catches hardlink aliases where path comparison cannot. */
+function sameInode(a: string, b: string): boolean {
+  try {
+    const sa = statSync(a);
+    const sb = statSync(b);
+    return sa.dev === sb.dev && sa.ino === sb.ino;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The journal and its SQLite sidecars (-wal/-shm/-journal) must never be the
+ * export target: writing the document there would truncate the input.
+ * Collisions are detected by canonical path AND inode so relative-path,
+ * symlink, and hardlink aliases are all refused.
+ */
+function outputCollidesWithJournal(output: string, journalPath: string): boolean {
+  const targets = [journalPath, `${journalPath}-wal`, `${journalPath}-shm`, `${journalPath}-journal`];
+  const canonicalOutput = canonicalPath(output);
+  for (const target of targets) {
+    if (canonicalPath(target) === canonicalOutput) return true;
+    if (existsSync(output) && sameInode(output, target)) return true;
+  }
+  return false;
+}
+
 async function runStatusCommand(rest: string[], cwd: string): Promise<number> {
   let storage: string | undefined;
   let output: string | undefined;
@@ -256,28 +302,39 @@ async function runStatusCommand(rest: string[], cwd: string): Promise<number> {
   }
   const journalPath = storage ?? join(cwd, ".relay", "storage.db");
 
+  if (output !== undefined && outputCollidesWithJournal(output, journalPath)) {
+    process.stderr.write(
+      `relay: refusing to write status output over the journal or its SQLite sidecars: ${output}\n`,
+    );
+    return 2;
+  }
+
   // The journal open is strictly read-only: a missing or unreadable journal
   // yields a document that says so, never a mutated or fabricated sample.
+  // Read/sample failures get the same generic unavailable document — raw
+  // error text stays on stderr and never enters the published document.
   let histories: import("@relay/core").EffectHistory[] = [];
+  let malformedRows = 0;
   let unavailableReason: string | undefined;
-  const reader = await SqliteEffectJournalReader.open({ path: journalPath }).catch((err: unknown) => {
+  try {
+    const reader = await SqliteEffectJournalReader.open({ path: journalPath });
+    try {
+      const result = await reader.readJournal();
+      histories = result.histories;
+      malformedRows = result.malformedRows;
+    } finally {
+      reader.close();
+    }
+  } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     process.stderr.write(`relay: status journal unavailable: ${message}\n`);
     if (message.includes("not found")) unavailableReason = "no journal file at the configured path";
     else if (message.includes("not a Relay effect journal") || message.includes("missing required column")) {
       unavailableReason = "file at the configured path is not a recognized Relay effect journal";
-    } else unavailableReason = "journal could not be opened read-only";
-    return undefined;
-  });
-  if (reader !== undefined) {
-    try {
-      histories = await reader.listHistory();
-    } finally {
-      reader.close();
-    }
+    } else unavailableReason = "journal could not be opened or sampled read-only";
   }
 
-  const document = buildStatusDocument({ histories, unavailableReason }, new Date());
+  const document = buildStatusDocument({ histories, malformedRows, unavailableReason }, new Date());
   const serialized = `${JSON.stringify(document, null, 2)}\n`;
   if (output === undefined) {
     process.stdout.write(serialized);

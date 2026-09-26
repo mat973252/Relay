@@ -21,21 +21,38 @@ integration, already accepted).
   yields `unavailable` history for every row; a legacy events table with
   extra free-form columns (`reason`, `remote_ref`) is read with the columns
   never selected and never migrated.
+- Controlled-field validation: `intent_json`, `remote_ref`, `result_json`,
+  `reason` are never selected (emitted as `NULL AS …` in the SELECT list).
+  Rows/events whose required controlled fields are malformed — unrecognized
+  status/cause, non-integer timestamps, wrong types, `replay ≠ 'never'` —
+  are dropped and counted in `malformedRows`; they never contribute to
+  status counts. A record whose event chain contains a malformed event
+  falls back to `unavailable` coverage rather than trusting a partial chain.
 - `relay status [--storage PATH] [--output PATH]` in `@relay/cli` +
   `buildStatusDocument` (`packages/cli/src/status.ts`): emits
   `mat-console.status/1` with aggregate evidence only — per-status counts,
   observed-history coverage counts, and the journal's own latest write time
   in `health.summary` (distinct from `generated_at`, the export time).
-  `ttl_seconds: 300`. Attention items: `unresolved-unknown-effects` (warn),
+  `ttl_seconds: 300`. Attention items: `safety-gate-closed` (info, always
+  present — links the gate review),
+  `malformed-journal-rows` (warn), `unresolved-unknown-effects` (warn),
   `history-coverage-gap` (info), `journal-unavailable` (warn).
 - Health is never `ok`: `attention` only when the journal itself shows
-  unresolved UNKNOWN effects or history gaps, otherwise `unknown`, with the
-  summary stating it is a local journal sample, not production readiness.
-  `progress`, `milestones`, and `runs` are omitted — the journal cannot
-  honestly support them.
+  unresolved UNKNOWN effects, history gaps, or malformed rows, otherwise
+  `unknown`, with the summary stating it is a local journal sample, not
+  production readiness. `progress`, `milestones`, and `runs` are omitted —
+  the journal cannot honestly support them.
+- `--output` collision guard (review fix): before any write, the output
+  path is rejected if it resolves to the journal or its `-wal`/`-shm`/
+  `-journal` sidecars — by canonical path (`realpath`) and inode identity
+  for existing files, covering relative-path, symlink, and hardlink
+  aliases. Refusal exits `2` and writes nothing.
 - The document carries no effect keys, ids, kind, `reason`, `remoteRef`,
   `result_json`, `intent_json`, artifacts, credentials, or Pi session/tool
-  ids. Unavailable input still yields a valid document (exit 1).
+  ids. Unavailable input still yields a valid document (exit 1), and
+  journal read/sample failures map into the same generic `unavailable`
+  document — raw error text goes to stderr only, never into the document
+  (review fix: read errors were previously outside the unavailable path).
 - `docs/STATUS-EXPORT.md` documents input, output, refresh, limits, and the
   local HTTP + CORS requirement for the console's `?url=` adapter.
   `relay-status.json` is gitignored. Evidence artifact:
@@ -50,7 +67,8 @@ integration, already accepted).
   the document — filesystem paths and SQLite error text go to stderr only
   (the document is meant to be publishable).
 - Exit codes: `0` sampled · `1` journal unavailable (document still emitted)
-  · `2` output write failed · `64` usage.
+  · `2` output write failed or refused (journal/sidecar collision) · `64`
+  usage.
 
 ## Tests run
 
@@ -61,10 +79,10 @@ corepack pnpm typecheck           # tsc -b — clean
 corepack pnpm -r --if-present test
 ```
 
-- Node v24.19.0 (Ubuntu, this machine): storage-sqlite 34/34 pass (7 new
-  read-only tests), core 40/40, artifact-fs 12/12, epistemic 8/8, cli 35/44.
+- Node v24.19.0 (Ubuntu, this machine): storage-sqlite 35/35 pass (8 new
+  read-only tests), core 40/40, artifact-fs 12/12, epistemic 8/8, cli 37/44.
 - Node v22.23.3 (same machine, nvm): identical results — storage-sqlite
-  34/34, cli 35/44.
+  35/35, cli 37/44.
 - The 9 cli failures are all `pi CLI not available on PATH` (doctor probe and
   cascades) — a pre-existing environment limit; identical on unmodified main
   (verified via stash). `pi` is not installed on this machine.
@@ -76,6 +94,12 @@ corepack pnpm -r --if-present test
   ids, `reason`, `remoteRef`, `result_json`, `intent_json` and an env secret
   never appear in output; contract shape (contract id, `generated_at` ISO-Z,
   health enum, no secret-looking keys); usage error → 64.
+- Review-regression tests added: `--output` refusal for identical path,
+  `-wal`/`-shm`/`-journal` sidecar names, symlink and hardlink aliases, and
+  a relative-path alias (exit 2, nothing written, journal byte-identical);
+  malformed-status/non-integer-timestamp rows and malformed events produce
+  a contract-valid document with `malformed-journal-rows` + always-present
+  `safety-gate-closed` attention, no marker leak, no fabricated counts.
 
 ## Consumer validation
 
@@ -112,10 +136,10 @@ input does not exist at all.
 
 - `packages/storage-sqlite/src/journal.ts` — `SqliteEffectJournalReader`
 - `packages/storage-sqlite/src/index.ts` — export
-- `packages/storage-sqlite/test/readonly.test.ts` — 7 new tests
+- `packages/storage-sqlite/test/readonly.test.ts` — 8 new tests
 - `packages/cli/src/status.ts` — `buildStatusDocument` (new)
 - `packages/cli/src/cli.ts` — `relay status` command + usage
-- `packages/cli/test/status.test.ts` — 7 new tests
+- `packages/cli/test/status.test.ts` — 9 new tests
 - `docs/STATUS-EXPORT.md`, `README.md`, `.gitignore`
 - `reports/mat-console-status-2026-09-26/` — labeled fixture artifact
 - `reports/MAT_CONSOLE_STATUS_RESULT.md` — this report

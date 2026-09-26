@@ -8,7 +8,7 @@
  */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -132,6 +132,7 @@ describe("relay status", () => {
 
     const attention = doc.attention ?? [];
     assert.ok(attention.some((a) => a.id === "unresolved-unknown-effects"));
+    assert.ok(attention.some((a) => a.id === "safety-gate-closed"), "safety gate CLOSED must stay visible");
     // Nothing identifiable or free-form leaves the journal.
     assert.ok(!output.includes(MARKER), "journal internals leaked into status output");
     assert.ok(!output.includes(SECRET_VALUE), "environment value leaked into status output");
@@ -153,8 +154,11 @@ describe("relay status", () => {
     const doc = parseDoc(result);
     assertDocumentShape(doc);
     assert.equal(doc.health?.state, "unknown");
-    assert.match(String(doc.health?.summary), /no effect records/);
-    assert.equal(doc.attention, undefined);
+    assert.match(String(doc.health?.summary), /no readable effect records/);
+    assert.deepEqual(
+      (doc.attention ?? []).map((a) => a.id),
+      ["safety-gate-closed"],
+    );
     assert.equal(sha256(dbPath), before);
   });
 
@@ -217,6 +221,93 @@ describe("relay status", () => {
     assertDocumentShape(doc);
     assert.equal(doc.attention?.[0]?.id, "journal-unavailable");
     assert.equal(sha256(dbPath), before);
+  });
+
+  it("malformed rows are excluded from counts and reported, never sampled as healthy", async () => {
+    const dir = join(tmp, "malformed");
+    mkdirSync(dir, { recursive: true });
+    const dbPath = join(dir, "storage.db");
+    const sqlite = await import("node:sqlite");
+    const raw = new sqlite.DatabaseSync(dbPath);
+    raw.exec(`
+      CREATE TABLE relay_effects (
+        id TEXT PRIMARY KEY, key TEXT NOT NULL UNIQUE, kind TEXT NOT NULL, request_hash TEXT NOT NULL,
+        intent_json TEXT, replay TEXT NOT NULL, status TEXT NOT NULL, remote_ref TEXT, result_json TEXT, reason TEXT,
+        created_at INTEGER NOT NULL, submitted_at INTEGER, settled_at INTEGER, updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE relay_effect_events (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT, effect_id TEXT NOT NULL REFERENCES relay_effects(id),
+        key TEXT NOT NULL, kind TEXT NOT NULL, from_status TEXT, to_status TEXT NOT NULL, cause TEXT NOT NULL,
+        at INTEGER NOT NULL
+      );
+      INSERT INTO relay_effects VALUES ('ok-1','ok/unknown-${MARKER}','k','h','{"i":"${MARKER}"}','never','UNKNOWN','ref-${MARKER}','{not json ${MARKER}','reason-${MARKER}',1,2,NULL,3);
+      INSERT INTO relay_effect_events VALUES (1,'ok-1','ok/unknown-${MARKER}','k',NULL,'PREPARED','prepare',1);
+      INSERT INTO relay_effect_events VALUES (2,'ok-1','ok/unknown-${MARKER}','k','PREPARED','SUBMITTED','submit',2);
+      INSERT INTO relay_effect_events VALUES (3,'ok-1','ok/unknown-${MARKER}','k','SUBMITTED','UNKNOWN','execute',3);
+      INSERT INTO relay_effects VALUES ('bad-status','bad/1-${MARKER}','k','h','never','never','TOTALLY-BOGUS',NULL,NULL,'${MARKER}',1,2,NULL,3);
+      INSERT INTO relay_effects VALUES ('bad-time','bad/2-${MARKER}','k','h','never','never','CONFIRMED',NULL,NULL,NULL,'not-a-number',NULL,NULL,3);
+      INSERT INTO relay_effect_events VALUES (4,'ok-1','ok/unknown-${MARKER}','k','SUBMITTED','SIDWAYS','execute',4);
+    `);
+    raw.close();
+    const before = sha256(dbPath);
+
+    const result = runCli(["status", "--storage", dbPath]);
+    const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+    assert.equal(result.status, 0, output);
+    const doc = parseDoc(result);
+    assertDocumentShape(doc);
+    assert.equal(doc.health?.state, "attention");
+    const summary = String(doc.health?.summary);
+    // Only the one well-formed row is sampled; the two malformed rows and
+    // the malformed event are counted separately — never as any status.
+    assert.match(summary, /1 effect \(1 unknown\)/);
+    assert.match(summary, /3 malformed rows excluded/);
+    const attention = doc.attention ?? [];
+    assert.ok(attention.some((a) => a.id === "malformed-journal-rows"));
+    assert.ok(attention.some((a) => a.id === "safety-gate-closed"));
+    // A record whose event chain contains a malformed event drops to unavailable coverage.
+    assert.ok(attention.some((a) => a.id === "history-coverage-gap"));
+    assert.ok(!output.includes(MARKER), "journal internals leaked into status output");
+    assert.equal(sha256(dbPath), before);
+  });
+
+  it("refuses --output that aliases the journal or its SQLite sidecars", async () => {
+    const dir = join(tmp, "collision");
+    const dbPath = await seedJournal(dir);
+    const before = sha256(dbPath);
+
+    const collisions: [string, string][] = [
+      ["identical path", dbPath],
+      ["wal sidecar", `${dbPath}-wal`],
+      ["shm sidecar", `${dbPath}-shm`],
+      ["journal sidecar", `${dbPath}-journal`],
+    ];
+    // Symlink and hardlink aliases of the journal itself.
+    const link = join(dir, "alias-link.db");
+    symlinkSync(dbPath, link);
+    collisions.push(["symlink alias", link]);
+    const hard = join(dir, "alias-hard.db");
+    linkSync(dbPath, hard);
+    collisions.push(["hardlink alias", hard]);
+
+    for (const [label, out] of collisions) {
+      const result = runCli(["status", "--storage", dbPath, "--output", out]);
+      assert.equal(result.status, 2, `${label}: ${result.stdout ?? ""}${result.stderr ?? ""}`);
+      assert.ok(!existsSync(join(dir, "relay-status.json")), label);
+      if (label.endsWith("sidecar")) assert.equal(existsSync(out), false, `${label}: sidecar was created`);
+      assert.match(String(result.stderr ?? ""), /refusing to write status output/);
+    }
+    assert.equal(sha256(dbPath), before, "journal must be byte-identical after refused writes");
+
+    // Relative-path alias from inside the journal's directory.
+    const rel = runCli(["status", "--storage", "storage.db", "--output", "./storage.db"], dir);
+    assert.equal(rel.status, 2);
+    assert.equal(sha256(dbPath), before);
+
+    // A non-colliding output still works.
+    const ok = runCli(["status", "--storage", dbPath, "--output", join(dir, "relay-status.json")]);
+    assert.equal(ok.status, 0);
+    assert.equal(existsSync(join(dir, "relay-status.json")), true);
   });
 
   it("--output writes the document to a file and keeps stdout clean of payload", async () => {

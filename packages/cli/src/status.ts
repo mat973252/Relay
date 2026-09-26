@@ -20,6 +20,9 @@ const CONTRACT_DOC_URL =
   "https://github.com/mat973252/mat-console/blob/main/docs/protocol-v1.md";
 const JOURNAL_DOC_URL =
   "https://github.com/mat973252/Relay/blob/main/docs/ARCHITECTURE.md";
+/** The actual gate review record — the safety gate stays visible as CLOSED. */
+const GATE_REVIEW_URL =
+  "https://github.com/mat973252/Relay/blob/main/reports/INDEPENDENT_RELAY_GATE_REVIEW_2026-09-25.md";
 
 export interface StatusAttention {
   id: string;
@@ -45,6 +48,12 @@ export interface StatusDocument {
 export interface JournalSample {
   /** Effect histories from a consistent read-only snapshot of the journal. */
   histories: EffectHistory[];
+  /**
+   * Journal rows/events dropped because their controlled fields were
+   * unreadable. Reported separately — malformed input is never counted as
+   * healthy.
+   */
+  malformedRows?: number;
   /**
    * Why the journal could not be sampled (missing file, not a Relay journal,
    * corrupt/unreadable). Generic wording only — it may end up in a public
@@ -73,6 +82,23 @@ function describeCounts(counts: Map<EffectStatus, number>): string {
     if (n > 0) parts.push(`${n} ${status.toLowerCase()}`);
   }
   return parts.length > 0 ? parts.join(", ") : "none";
+}
+
+/**
+ * Always visible: the overall Relay safety gate is CLOSED per the gate
+ * review; this export is a local journal sample, not gate evidence.
+ */
+function safetyGateAttention(): StatusAttention {
+  return {
+    id: "safety-gate-closed",
+    title: "Relay safety gate remains CLOSED",
+    detail:
+      "This document reports a local journal sample only. The overall Relay safety " +
+      "gate is closed until a concrete provider completion/reconcile contract and " +
+      "trusted workspace boundary are verified — see the gate review.",
+    severity: "info",
+    evidence_url: GATE_REVIEW_URL,
+  };
 }
 
 /**
@@ -109,6 +135,7 @@ export function buildStatusDocument(sample: JournalSample, generatedAt: Date): S
         severity: "warn",
         evidence_url: JOURNAL_DOC_URL,
       },
+      safetyGateAttention(),
     ];
     return document;
   }
@@ -122,7 +149,19 @@ export function buildStatusDocument(sample: JournalSample, generatedAt: Date): S
     latestWrite = Math.max(latestWrite ?? 0, h.record.updatedAt, h.events.at(-1)?.at ?? 0);
   }
 
-  const attention: StatusAttention[] = [];
+  const attention: StatusAttention[] = [safetyGateAttention()];
+  const malformedRows = sample.malformedRows ?? 0;
+  if (malformedRows > 0) {
+    attention.push({
+      id: "malformed-journal-rows",
+      title: `${malformedRows} journal record${malformedRows === 1 ? "" : "s"} could not be interpreted`,
+      detail:
+        "Rows/events with unreadable controlled fields (status, timestamps, shape) " +
+        "were excluded from every count and no values were exported.",
+      severity: "warn",
+      evidence_url: JOURNAL_DOC_URL,
+    });
+  }
   const unknownCount = counts.get("UNKNOWN") ?? 0;
   if (unknownCount > 0) {
     attention.push({
@@ -148,25 +187,28 @@ export function buildStatusDocument(sample: JournalSample, generatedAt: Date): S
       evidence_url: JOURNAL_DOC_URL,
     });
   }
-  if (attention.length > 0) document.attention = attention;
+  document.attention = attention;
 
   const recency =
     latestWrite === undefined ? "" : `; latest journal write ${isoUtc(latestWrite)}`;
+  const malformed =
+    malformedRows === 0 ? "" : `; ${malformedRows} malformed row${malformedRows === 1 ? "" : "s"} excluded`;
   if (histories.length === 0) {
     document.health = {
-      state: "unknown",
-      summary: "local effect journal contains no effect records",
+      state: malformedRows > 0 ? "attention" : "unknown",
+      summary: `local effect journal contains no readable effect records${malformed}`,
     };
     return document;
   }
 
-  const needsAttention = unknownCount > 0 || historyGap > 0;
+  const needsAttention = unknownCount > 0 || historyGap > 0 || malformedRows > 0;
+  const effectNoun = histories.length === 1 ? "effect" : "effects";
   document.health = {
     // Never "ok": a clean journal sample is not evidence of production health.
     state: needsAttention ? "attention" : "unknown",
     summary:
-      `local journal sample: ${histories.length} effects (${describeCounts(counts)}); ` +
-      `transition history observed for ${coverage.observed} of ${histories.length}${recency}. ` +
+      `local journal sample: ${histories.length} ${effectNoun} (${describeCounts(counts)}); ` +
+      `transition history observed for ${coverage.observed} of ${histories.length}${recency}${malformed}. ` +
       "Local journal evidence only — not a production-readiness claim.",
   };
   return document;
