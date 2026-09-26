@@ -13,3 +13,4 @@ dist/
 .relay-import-*/
 .relay-capsule-*/
 .relay.pre-import-old/
+relay-status.json

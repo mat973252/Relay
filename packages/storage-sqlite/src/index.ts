@@ -8,7 +8,12 @@ import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { ProbeOutcome } from "@relay/core";
 
-export { SqliteEffectJournal, type SqliteEffectJournalOptions } from "./journal.js";
+export {
+  SqliteEffectJournal,
+  SqliteEffectJournalReader,
+  type JournalReadResult,
+  type SqliteEffectJournalOptions,
+} from "./journal.js";
 
 export interface StorageProbeOptions {
   /** Filesystem path of the SQLite database file to probe. */

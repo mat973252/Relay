@@ -11,7 +11,9 @@
  * The CLI never reads or prints arbitrary environment values.
  */
 import { spawnSync } from "node:child_process";
-import { dirname, join } from "node:path";
+import { writeFile } from "node:fs/promises";
+import { existsSync, realpathSync, statSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   RELAY_VERSION,
@@ -26,7 +28,8 @@ import { probeSqliteStorage } from "@relay/storage-sqlite";
 import { ArtifactStore, probeArtifactRoot, type ArtifactRecord, type LineageNode } from "@relay/artifact-fs";
 import { evaluateCapabilitiesFile } from "./capabilities.js";
 import { exportCapsule, importCapsule } from "./capsule.js";
-import { SqliteEffectJournal } from "@relay/storage-sqlite";
+import { SqliteEffectJournal, SqliteEffectJournalReader } from "@relay/storage-sqlite";
+import { buildStatusDocument } from "./status.js";
 
 const USAGE = `relay — durable execution continuity for AI agents (M2)
 
@@ -39,6 +42,7 @@ usage:
   relay export [--output PATH] [--capabilities PATH] [--adapter-context PATH]
                [--workspace PATH]
   relay import <capsule> [--workspace PATH] [--overwrite]
+  relay status [--storage PATH] [--output PATH]
   relay --help
 
 <artifact-ref> accepts a record id, a sha256 digest, or artifact://sha256/<digest>
@@ -49,6 +53,13 @@ else ./relay.capabilities.yaml. Import never touches the root copy.
 
 doctor exit codes:
   0 ok/READY  |  1 degraded/DEGRADED  |  2 blocked/BLOCKED  |  64 usage error
+
+status emits a mat-console.status/1 JSON document from a read-only open of the
+effect journal (no directory/DB creation, no schema migration, no pragma
+writes). With --output the document is written to PATH; otherwise to stdout.
+exit codes: 0 journal sampled | 1 journal unavailable (document still emitted)
+| 2 output write failed or refused (--output must never be the journal or
+its -wal/-shm/-journal sidecars) | 64 usage error
 `;
 
 interface DoctorArgs {
@@ -231,6 +242,120 @@ async function runEffectsCommand(rest: string[], cwd: string): Promise<number> {
   }
 }
 
+/**
+ * Canonicalized identity for a path that may not exist: symlinks are
+ * resolved when possible, otherwise the parent directory's real path is
+ * combined with the entry name.
+ */
+function canonicalPath(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    try {
+      return join(realpathSync(dirname(path)), basename(path));
+    } catch {
+      return resolve(path);
+    }
+  }
+}
+
+/** dev+ino identity — catches hardlink aliases where path comparison cannot. */
+function sameInode(a: string, b: string): boolean {
+  try {
+    const sa = statSync(a);
+    const sb = statSync(b);
+    return sa.dev === sb.dev && sa.ino === sb.ino;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The journal and its SQLite sidecars (-wal/-shm/-journal) must never be the
+ * export target: writing the document there would truncate the input.
+ * Collisions are detected by canonical path AND inode so relative-path,
+ * symlink, and hardlink aliases are all refused.
+ */
+function outputCollidesWithJournal(output: string, journalPath: string): boolean {
+  // Protect sidecar names under BOTH the configured path and the canonical
+  // (realpath) database path: when --storage is itself a symlink alias, the
+  // real journal's sidecars live next to the resolved target and may not
+  // exist yet — comparing only alias-sidecar names would miss them.
+  const journalCanon = canonicalPath(journalPath);
+  const bases = journalCanon === journalPath ? [journalPath] : [journalPath, journalCanon];
+  const targets = bases.flatMap((b) => [b, `${b}-wal`, `${b}-shm`, `${b}-journal`]);
+  const canonicalOutput = canonicalPath(output);
+  for (const target of targets) {
+    if (canonicalPath(target) === canonicalOutput) return true;
+    if (existsSync(output) && sameInode(output, target)) return true;
+  }
+  return false;
+}
+
+async function runStatusCommand(rest: string[], cwd: string): Promise<number> {
+  let storage: string | undefined;
+  let output: string | undefined;
+  for (let i = 0; i < rest.length; i++) {
+    const arg = rest[i];
+    if (arg === undefined) break;
+    if (arg === "--storage") {
+      storage = requireValue(rest, i + 1, "--storage");
+      i += 1;
+    } else if (arg === "--output") {
+      output = requireValue(rest, i + 1, "--output");
+      i += 1;
+    } else usageError(`unknown argument for status: ${arg}`);
+  }
+  const journalPath = storage ?? join(cwd, ".relay", "storage.db");
+
+  if (output !== undefined && outputCollidesWithJournal(output, journalPath)) {
+    process.stderr.write(
+      `relay: refusing to write status output over the journal or its SQLite sidecars: ${output}\n`,
+    );
+    return 2;
+  }
+
+  // The journal open is strictly read-only: a missing or unreadable journal
+  // yields a document that says so, never a mutated or fabricated sample.
+  // Read/sample failures get the same generic unavailable document — raw
+  // error text stays on stderr and never enters the published document.
+  let histories: import("@relay/core").EffectHistory[] = [];
+  let malformedRows = 0;
+  let unavailableReason: string | undefined;
+  try {
+    const reader = await SqliteEffectJournalReader.open({ path: journalPath });
+    try {
+      const result = await reader.readJournal();
+      histories = result.histories;
+      malformedRows = result.malformedRows;
+    } finally {
+      reader.close();
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`relay: status journal unavailable: ${message}\n`);
+    if (message.includes("not found")) unavailableReason = "no journal file at the configured path";
+    else if (message.includes("not a Relay effect journal") || message.includes("missing required column")) {
+      unavailableReason = "file at the configured path is not a recognized Relay effect journal";
+    } else unavailableReason = "journal could not be opened or sampled read-only";
+  }
+
+  const document = buildStatusDocument({ histories, malformedRows, unavailableReason }, new Date());
+  const serialized = `${JSON.stringify(document, null, 2)}\n`;
+  if (output === undefined) {
+    process.stdout.write(serialized);
+  } else {
+    try {
+      await writeFile(output, serialized, "utf8");
+    } catch (err) {
+      process.stderr.write(`relay: cannot write status output: ${err instanceof Error ? err.message : String(err)}\n`);
+      return 2;
+    }
+    process.stdout.write(`wrote ${output}\n`);
+  }
+  return unavailableReason === undefined ? 0 : 1;
+}
+
 async function runExportCommand(rest: string[], cwd: string): Promise<number> {
   let output: string | undefined;
   let workspace: string | undefined;
@@ -331,6 +456,9 @@ export async function main(argv: string[], cwd: string = process.cwd()): Promise
   }
   if (command === "import") {
     return runImportCommand(rest, cwd);
+  }
+  if (command === "status") {
+    return runStatusCommand(rest, cwd);
   }
   if (command !== "doctor") {
     usageError(`unknown command: ${command}`);
