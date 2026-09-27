@@ -3,7 +3,7 @@
 Use Node 24 (or Node 22.13+). Install the CLI and MCP server:
 
 ```sh
-npm install -g @mat973252/relay-cli@0.1.0 @mat973252/relay-mcp@0.1.0
+npm install -g @mat973252/relay-cli@0.1.1 @mat973252/relay-mcp@0.1.0
 relay --help
 ```
 
@@ -113,7 +113,7 @@ these published packages, not dependencies on somebody else's npm scope.
 For the model-free crash demo and synthetic business sandbox, use the
 [source quickstart](../README.md#the-one-sitting-proof-no-pi-no-model-account-no-docker).
 
-## 交接后先解释记录状态（本轮源码分支，尚未发布 npm）
+## 交接后先解释记录状态（CLI 0.1.1）
 
 ```bash
 relay effects --explain --storage .relay/storage.db
