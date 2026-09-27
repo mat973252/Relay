@@ -30,6 +30,7 @@ import { evaluateCapabilitiesFile } from "./capabilities.js";
 import { exportCapsule, importCapsule } from "./capsule.js";
 import { SqliteEffectJournal, SqliteEffectJournalReader } from "@relay/storage-sqlite";
 import { buildStatusDocument } from "./status.js";
+import { explainEffects } from "./effect-guidance.js";
 
 const USAGE = `relay — durable execution continuity for AI agents (M2)
 
@@ -39,6 +40,7 @@ usage:
   relay lineage <artifact-ref> [--json] [--artifacts PATH]
   relay effects [--json] [--storage PATH]
   relay effects --history [--key KEY] [--json] [--storage PATH]
+  relay effects --explain [--key KEY] [--storage PATH]
   relay export [--output PATH] [--capabilities PATH] [--adapter-context PATH]
                [--workspace PATH]
   relay import <capsule> [--workspace PATH] [--overwrite]
@@ -188,6 +190,7 @@ async function runArtifactsCommand(rest: string[], cwd: string): Promise<number>
 async function runEffectsCommand(rest: string[], cwd: string): Promise<number> {
   let json = false;
   let history = false;
+  let explain = false;
   let key: string | undefined;
   let storage: string | undefined;
   for (let i = 0; i < rest.length; i++) {
@@ -195,6 +198,7 @@ async function runEffectsCommand(rest: string[], cwd: string): Promise<number> {
     if (arg === undefined) break;
     if (arg === "--json") json = true;
     else if (arg === "--history") history = true;
+    else if (arg === "--explain") explain = true;
     else if (arg === "--key") {
       key = requireValue(rest, i + 1, "--key");
       i += 1;
@@ -203,7 +207,21 @@ async function runEffectsCommand(rest: string[], cwd: string): Promise<number> {
       i += 1;
     } else usageError(`unknown argument for effects: ${arg}`);
   }
-  if (key !== undefined && !history) usageError("--key requires --history");
+  if (key !== undefined && !history && !explain) usageError("--key requires --history or --explain");
+  if (explain && (json || history)) usageError("--explain cannot be combined with --json or --history");
+  if (explain) {
+    try {
+      const reader = await SqliteEffectJournalReader.open({ path: storage ?? join(cwd, ".relay", "storage.db") });
+      try {
+        const { histories, malformedRows } = await reader.readJournal(key);
+        process.stdout.write(explainEffects(histories, malformedRows));
+        return malformedRows > 0 || (key !== undefined && histories.length === 0) ? 1 : 0;
+      } finally { reader.close(); }
+    } catch (err) {
+      process.stderr.write(`relay: cannot explain journal: ${err instanceof Error ? err.message : String(err)}\n`);
+      return 1;
+    }
+  }
   const journal = await SqliteEffectJournal.open({ path: storage ?? join(cwd, ".relay", "storage.db") });
   try {
     if (history) {
