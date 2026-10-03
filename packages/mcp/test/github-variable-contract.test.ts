@@ -10,6 +10,7 @@ import { after, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { runLocalVariable, type VariableIntent } from "./fixtures/github-variable-effect.js";
 import { SqliteEffectJournal } from "@relay/storage-sqlite";
+import { lockExists, takeWorkspaceOwnership } from "../src/lock.js";
 
 const root = mkdtempSync(join(tmpdir(), "relay-variable-contract-"));
 after(() => rmSync(root, { recursive: true, force: true }));
@@ -61,6 +62,39 @@ it("confirms exact local context once and never persists authentication", async 
     await assert.rejects(runLocalVariable(workspace, { ...p.intent, repositoryId: 18 }, TOKEN), /different effect/);
     await assert.rejects(runLocalVariable(workspace, { ...p.intent, baseUrl: "http://127.0.0.1:1" }, TOKEN), /different effect/);
     assert.equal(p.state.posts, 1);
+  } finally { await p.close(); }
+});
+
+it("snapshots validated intent before yielding to the caller", async () => {
+  const p = await provider();
+  const workspace = mkdtempSync(join(root, "intent-mutation-"));
+  const original = { ...p.intent };
+  try {
+    const result = await runLocalVariable(workspace, p.intent, TOKEN, {
+      afterAcquire: async () => { p.intent.repositoryId = 18; },
+    });
+    assert.equal(result.status, "confirmed");
+    assert.equal((await runLocalVariable(workspace, original, TOKEN)).status, "confirmed");
+    assert.equal(p.state.posts, 1);
+    await assert.rejects(runLocalVariable(workspace, p.intent, TOKEN), /different effect/);
+  } finally { await p.close(); }
+});
+
+it("a nested caller cannot borrow or release the active fixture lock", async () => {
+  const p = await provider();
+  const workspace = mkdtempSync(join(root, "nested-owner-"));
+  try {
+    const result = await runLocalVariable(workspace, p.intent, TOKEN, {
+      afterAcquire: async () => {
+        assert.equal((await runLocalVariable(workspace, p.intent, TOKEN)).status, "locked");
+        assert.equal(await lockExists(workspace), true);
+        assert.equal((await takeWorkspaceOwnership(workspace, { reentrant: false })).kind, "held-elsewhere");
+        assert.equal(p.state.posts, 0);
+      },
+    });
+    assert.equal(result.status, "confirmed");
+    assert.equal(p.state.posts, 1);
+    assert.equal(await lockExists(workspace), false);
   } finally { await p.close(); }
 });
 

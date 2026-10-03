@@ -19,6 +19,7 @@ export async function runLocalVariable(
   token: string,
   options: { crashPrepared?: boolean; afterAcquire?: () => Promise<void> } = {},
 ) {
+  intent = { ...intent };
   const origin = new URL(intent.baseUrl);
   if (origin.protocol !== "http:" || origin.hostname !== "127.0.0.1" || origin.origin !== intent.baseUrl) {
     throw new Error("local contract only: expected a loopback origin");
@@ -27,7 +28,7 @@ export async function runLocalVariable(
     throw new Error("invalid synthetic context");
   }
   await mkdir(workspace, { recursive: true });
-  const ownership = await takeWorkspaceOwnership(workspace);
+  const ownership = await takeWorkspaceOwnership(workspace, { reentrant: false });
   if (ownership.kind !== "acquired") return { status: "locked" as const };
   try {
     await options.afterAcquire?.();
