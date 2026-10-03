@@ -56,3 +56,27 @@ node packages/mcp/dist/examples/github-preflight.js --repo OWNER/REPO --repo-id 
 根据[GitHub变量API](https://docs.github.com/en/rest/actions/variables#list-repository-variables)，变量列表需要对应读取权限；仓库admin/push信息不能证明Variables写权限。输出始终`variablesWrite=unverified`、`postAuthorized=false`。退出0仅表示本次枚举完成且未见同名项，2表示阻断，64表示参数错误。404不等于不存在；总数变化、重复项、不完整分页、身份变化或查询失败均不通过。分页上限100页，超限保守阻断。
 
 GitHub分页不是原子快照；等量增删可能不被总数检测，`atomicSnapshot=false`保留此限制。预检不能为后续POST提供唯一性保证，也不能代替用户授权、实际Variables写权限或单写者执行入口。此脚本完全没有POST/修改/删除分支；本轮仅以注入HTTP响应及无令牌实际CLI验证，尚未对具体远端仓库执行。
+
+## 外部执行入口设计（2026-10-03，尚未实现）
+
+范围只限一个专用测试仓库中的一个随机测试变量。保持现有SDK状态机不变，独立验收入口分为计划、首次提交和只读核对；不把执行与恢复藏在同一个重试命令中。
+
+计划文件只含固定 `https://api.github.com`、repo全名与数字ID、随机 `RELAY_PROBE_` 名称、合成非秘密value、固定key/kind/requestHash、规范化workspace路径及计划版本。生成计划本身不联网、不授予权限。用户审核具体计划后，首次提交命令才接受该计划；命令开关、文件中的approved字段或预检exit0均不能作为用户授权的替代。令牌只从本次进程的RELAY_GITHUB_TOKEN取得，不读取其他工具凭据。
+
+先规范化workspace并限制同进程只有一个入口调用，再取得同一workspace锁，随后打开journal、核对key/kind/hash和既有记录；直到journal关闭才释放锁。两个路径指向同一目录时必须归一化，不能建立两把锁。不同workspace、直接改库、绕过入口的HTTP及跨主机不在保证范围内。
+
+| 命令 / 本地记录 | 外部请求与结果 |
+| --- | --- |
+| 首次提交 / 无记录 | 已有具体授权且只读预检通过后，调用runEffect；执行路径再核验仓库身份，最多一次POST；只有随后GET精确匹配才确认 |
+| 首次提交 / 任意既有记录 | 拒绝，不POST，提示核对同一计划；不能换新key掩盖未知结果 |
+| 只读核对 / 无记录 | 拒绝，不创建record、不POST |
+| 只读核对 / PREPARED | 返回prepared_not_submitted，不调用runEffect、不修改状态、不POST；后续是否继续这次未提交操作由操作者另行决定 |
+| 只读核对 / SUBMITTED或UNKNOWN | 只GET核对固定身份/name/value；匹配才确认，否则保持UNKNOWN，不返回found=false |
+| 只读核对 / CONFIRMED或FAILED | 返回既有终态，不重查、不POST；另做远端审计不能降级或重放该终态 |
+| 任意命令 / 身份、hash或workspace不符 | 在执行前拒绝，保留原journal，不发POST |
+
+PREPARED处理刻意与SDK默认继续执行区分。`runEffect`在PREPARED下会先markSubmitted再execute，因此只读命令不能把PREPARED直接交给它。SQLite的markSubmitted已经用 `WHERE status = 'PREPARED'` 和changes校验保护单次转移，不能仅凭源码中先读后写就宣称现有SQLite双进程必然重复POST；外部入口仍需要workspace锁，把身份/权限检查与journal决策纳入一个单写者范围。
+
+发送前能确定未开始HTTP提交的失败可保留明确not_submitted证据；一旦进入POST调用，响应丢失、非201、查询失败或上下文不匹配均保守映射UNKNOWN。请求计数在调用前递增，包含发送失败尝试；进程强杀时本地计数尾部可能缺失，不能据此宣称远端历史执行次数。验收单列客户端可观察尝试数、远端当前对象及journal转移，允许unobserved，不补造数字。
+
+实现前冻结测试：无授权/无令牌/碰撞/身份不符POST0；首次成功POST1；丢回执后核对POST仍1；所有既有状态的首次提交POST0；PREPARED只读核对保留原状态；UNKNOWN不匹配保持UNKNOWN；双进程与同进程竞争只允许一个入口执行；计划字段改变拒绝；令牌哨兵不进入journal/报告；终态缓存不再请求。先用注入transport和本地fixture覆盖，随后才安排已授权专用仓库的真实验收。此设计没有增加真实服务已支持的声明。
