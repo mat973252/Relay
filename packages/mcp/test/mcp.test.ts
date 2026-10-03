@@ -42,6 +42,7 @@ describe("relay-mcp server", () => {
       assert.equal(again.status, "confirmed");
       assert.equal(again.deduplicated, true);
       assert.equal(provider.counter(), 1, "duplicate submission executed the remote action twice");
+      assert.deepEqual(provider.requests(), ["POST /increment"], "duplicate submission must not contact the provider");
 
       const state = await client.call("relay_get_operation", { actionId: "counter-increment", operationId: OP });
       assert.match(state.text, /CONFIRMED/);
@@ -73,6 +74,7 @@ describe("relay-mcp server", () => {
     await submitted;
     assert.equal(provider.counter(), 1);
     assert.equal(await journalStatus(workspace, KEY), "SUBMITTED");
+    assert.deepEqual(provider.requests(), ["POST /increment"]);
 
     // Fresh server process (lock takeover after death), fresh "session".
     const clientB = await connectClient(workspace);
@@ -80,6 +82,7 @@ describe("relay-mcp server", () => {
       const list = await clientB.call("relay_list_unresolved", {});
       assert.match(list.text, new RegExp(KEY.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
       assert.match(list.text, /SUBMITTED/);
+      assert.deepEqual(provider.requests(), ["POST /increment"], "restart and listing must not resubmit");
 
       const reconciled = await clientB.call("relay_reconcile_operation", {
         actionId: "counter-increment",
@@ -90,6 +93,7 @@ describe("relay-mcp server", () => {
       assert.equal(outcome.status, "confirmed");
       assert.equal(outcome.reconciled, true);
       assert.equal(provider.counter(), 1, "reconciliation must be read-only");
+      assert.deepEqual(provider.requests(), ["POST /increment", `GET /effects/${OP}`]);
       assert.equal(await journalStatus(workspace, KEY), "CONFIRMED");
     } finally {
       clientB.kill();

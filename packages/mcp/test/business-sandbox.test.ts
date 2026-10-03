@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { performance } from "node:perf_hooks";
 import { after, it } from "node:test";
 import { connectClient, journalStatus, makeTempRoot, makeWorkspace, writeRawActions } from "./helpers.js";
 import { EXPECTED_CSV, reportSnapshot, startReportProvider, type Fault } from "./fixtures/report-provider.js";
@@ -17,12 +18,27 @@ function configure(workspace: string, baseUrl: string) {
   }] });
 }
 async function until(check: () => boolean) {
-  const deadline = Date.now() + 5000;
+  const deadline = performance.now() + 5000;
   while (!check()) {
-    assert.ok(Date.now() < deadline, "business condition timed out");
+    assert.ok(performance.now() < deadline, "business condition timed out");
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
 }
+
+it("business waits tolerate wall-clock adjustments", async (t) => {
+  let wallReads = 0;
+  t.mock.method(Date, "now", () => 1_000 + wallReads++ * 60_000);
+  let polls = 0;
+  await until(() => ++polls === 3);
+  assert.equal(polls, 3);
+});
+
+it("business waits still reject an expired monotonic deadline", async (t) => {
+  let elapsed = 0;
+  t.mock.method(performance, "now", () => elapsed++ * 5000);
+  await assert.rejects(until(() => false), /business condition timed out/);
+  assert.equal(elapsed, 2, "the exact deadline must fail without another poll");
+});
 
 for (const fault of ["accepted", "disconnect", "hold"] as Fault[]) {
   it(`durable report export: ${fault}, double restart, invisible/pending/complete`, { timeout: 40_000 }, async () => {
