@@ -57,6 +57,8 @@ node packages/mcp/dist/examples/github-preflight.js --repo OWNER/REPO --repo-id 
 
 GitHub分页不是原子快照；等量增删可能不被总数检测，`atomicSnapshot=false`保留此限制。预检不能为后续POST提供唯一性保证，也不能代替用户授权、实际Variables写权限或单写者执行入口。此脚本完全没有POST/修改/删除分支；本轮仅以注入HTTP响应及无令牌实际CLI验证，尚未对具体远端仓库执行。
 
+官方契约复核（2026-10-03）：[仓库变量API](https://docs.github.com/en/rest/actions/variables)列出列表/单项GET成功为200、创建成功为201，fine-grained token分别需要Variables read/write；单项响应含name/value，列表含total_count/variables，per_page上限30。当前请求与响应判断匹配这些文档。预检逐页核对唯一名称数及total_count，没有解析[Link分页头](https://docs.github.com/en/rest/using-the-rest-api/using-pagination-in-the-rest-api)；这只是有界枚举策略，不是服务器原子快照或可靠不存在证明。文档一致性不等于实际令牌权限、网络响应或远端效果已验收。
+
 ## 外部执行入口设计（2026-10-03；实现与验证状态见后文）
 
 范围只限一个专用测试仓库中的一个随机测试变量。保持现有SDK状态机不变，独立验收入口分为计划、首次提交和只读核对；不把执行与恢复藏在同一个重试命令中。
@@ -70,12 +72,14 @@ GitHub分页不是原子快照；等量增删可能不被总数检测，`atomicS
 | 首次提交 / 无记录 | 已有具体授权且只读预检通过后，调用runEffect；执行路径再核验仓库身份，最多一次POST；只有随后GET精确匹配才确认 |
 | 首次提交 / 任意既有记录 | 拒绝，不POST，提示核对同一计划；不能换新key掩盖未知结果 |
 | 只读核对 / 无记录 | 拒绝，不创建record、不POST |
-| 只读核对 / PREPARED | 返回prepared_not_submitted，不调用runEffect、不修改状态、不POST；后续是否继续这次未提交操作由操作者另行决定 |
+| 只读核对 / PREPARED | 返回prepared_not_submitted，不调用runEffect、不修改状态、不POST；该记录尚未进入提交阶段，后续是否继续由操作者另行决定 |
 | 只读核对 / SUBMITTED或UNKNOWN | 只GET核对固定身份/name/value；匹配才确认，否则保持UNKNOWN，不返回found=false |
 | 只读核对 / CONFIRMED或FAILED | 返回既有终态，不重查、不POST；另做远端审计不能降级或重放该终态 |
 | 任意命令 / 身份、hash或workspace不符 | 在执行前拒绝，保留原journal，不发POST |
 
 PREPARED处理刻意与SDK默认继续执行区分。`runEffect`在PREPARED下会先markSubmitted再execute，因此只读命令不能把PREPARED直接交给它。SQLite的markSubmitted已经用 `WHERE status = 'PREPARED'` 和changes校验保护单次转移，不能仅凭源码中先读后写就宣称现有SQLite双进程必然重复POST；外部入口仍需要workspace锁，把身份/权限检查与journal决策纳入一个单写者范围。
+
+`SUBMITTED`只说明本地已进入提交阶段，不证明POST已发出或远端已经改变；进程可能在markSubmitted后、HTTP调用前退出。必须按既有只读核对路径处理，不能由状态名称推算请求次数。
 
 发送前能确定未开始HTTP提交的失败可保留明确not_submitted证据；一旦进入POST调用，响应丢失、非201、查询失败或上下文不匹配均保守映射UNKNOWN。请求计数在调用前递增，包含发送失败尝试；进程强杀时本地计数尾部可能缺失，不能据此宣称远端历史执行次数。验收单列客户端可观察尝试数、远端当前对象及journal转移，允许unobserved，不补造数字。
 
