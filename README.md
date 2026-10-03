@@ -20,7 +20,7 @@ Relay does **not** reimplement Pi's agent loop, session tree, suspended runs, de
 Relay v0.1 covers these milestones:
 
 - **M0 — Native integration:** load as a Pi package/extension without forking Pi.
-- **M1 — Crash-safe effects:** unsafe external effects are never silently duplicated.
+- **M1 — Crash-safe effects:** uncertain effects routed through Relay remain UNKNOWN for reconciliation instead of blind resubmission; external execution guarantees depend on the provider contract.
 - **M2 — Durable artifacts:** outputs survive outside conversation context with lineage.
 - **M3 — Portable execution:** export on machine A, import on machine B, validate capabilities, and resume with Pi.
 - **M4 — Deferred migration:** a Pi suspended/deferred operation is resumed without submitting the remote job twice.
@@ -58,6 +58,8 @@ node examples/crash-demo.mjs
 ```
 
 The demo needs no model account. See [release scope and verification](reports/RELEASE_V0.1.0.md).
+
+For the current source candidate's read-only GitHub preflight and opt-in probe, see the [real-provider contract](docs/REAL-PROVIDER-CONTRACT.md). These examples are not npm entry points and have not passed real GitHub acceptance. A specific test repository and explicit authorization for the planned write are still required.
 
 Everything runs from the repository root; no machine-specific paths are embedded:
 

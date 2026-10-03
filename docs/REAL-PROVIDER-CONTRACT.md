@@ -53,7 +53,7 @@ node packages/mcp/dist/examples/github-preflight.js --repo OWNER/REPO --repo-id 
 
 调用前由用户在本机配置`RELAY_GITHUB_TOKEN`，不要把值放到命令参数、聊天或日志。示例不自动读取gh/Codex凭据；没有令牌直接阻断且不请求网络。只对固定`https://api.github.com`发GET，拒绝重定向，核对仓库数字ID和完整名称，并分页读取变量列表；不输出已有变量名称/值、响应正文、异常正文或额外输入字段。
 
-根据[GitHub变量API](https://docs.github.com/en/rest/actions/variables#list-repository-variables)，变量列表需要对应读取权限；仓库admin/push信息不能证明Variables写权限。输出始终`variablesWrite=unverified`、`postAuthorized=false`。退出0仅表示本次枚举完成且未见同名项，2表示阻断，64表示参数错误。404不等于不存在；总数变化、重复项、不完整分页、身份变化或查询失败均不通过。分页上限100页，超限保守阻断。
+根据[GitHub变量API](https://docs.github.com/en/rest/actions/variables#list-repository-variables)，变量列表需要对应读取权限；仓库admin/push信息不能证明Variables写权限。输出始终`variablesWrite=unverified`、`postAuthorized=false`。退出0仅表示本次枚举完成且未见同名项，2表示阻断，64表示参数错误。404不等于不存在；总数变化、重复项、不完整分页、初次仓库身份不匹配或查询失败均不通过。独立预检只在枚举前核对一次仓库身份，不能检测枚举期间或之后的身份变化；后文execute入口会在POST前另行复查，仍不构成原子保证。分页上限100页，超限保守阻断。
 
 GitHub分页不是原子快照；等量增删可能不被总数检测，`atomicSnapshot=false`保留此限制。预检不能为后续POST提供唯一性保证，也不能代替用户授权、实际Variables写权限或单写者执行入口。此脚本完全没有POST/修改/删除分支；本轮仅以注入HTTP响应及无令牌实际CLI验证，尚未对具体远端仓库执行。
 
