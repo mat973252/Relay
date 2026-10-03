@@ -57,7 +57,7 @@ node packages/mcp/dist/examples/github-preflight.js --repo OWNER/REPO --repo-id 
 
 GitHub分页不是原子快照；等量增删可能不被总数检测，`atomicSnapshot=false`保留此限制。预检不能为后续POST提供唯一性保证，也不能代替用户授权、实际Variables写权限或单写者执行入口。此脚本完全没有POST/修改/删除分支；本轮仅以注入HTTP响应及无令牌实际CLI验证，尚未对具体远端仓库执行。
 
-## 外部执行入口设计（2026-10-03，尚未实现）
+## 外部执行入口设计（2026-10-03；实现与验证状态见后文）
 
 范围只限一个专用测试仓库中的一个随机测试变量。保持现有SDK状态机不变，独立验收入口分为计划、首次提交和只读核对；不把执行与恢复藏在同一个重试命令中。
 
@@ -80,3 +80,26 @@ PREPARED处理刻意与SDK默认继续执行区分。`runEffect`在PREPARED下�
 发送前能确定未开始HTTP提交的失败可保留明确not_submitted证据；一旦进入POST调用，响应丢失、非201、查询失败或上下文不匹配均保守映射UNKNOWN。请求计数在调用前递增，包含发送失败尝试；进程强杀时本地计数尾部可能缺失，不能据此宣称远端历史执行次数。验收单列客户端可观察尝试数、远端当前对象及journal转移，允许unobserved，不补造数字。
 
 实现前冻结测试：无授权/无令牌/碰撞/身份不符POST0；首次成功POST1；丢回执后核对POST仍1；所有既有状态的首次提交POST0；PREPARED只读核对保留原状态；UNKNOWN不匹配保持UNKNOWN；双进程与同进程竞争只允许一个入口执行；计划字段改变拒绝；令牌哨兵不进入journal/报告；终态缓存不再请求。先用注入transport和本地fixture覆盖，随后才安排已授权专用仓库的真实验收。此设计没有增加真实服务已支持的声明。
+
+## 单次验收入口（源码候选，尚无真实GitHub验收）
+
+`packages/mcp/examples/github-probe.ts`与`github-probe-cli.ts`实现上述分离入口，不进入npm的dist/src公开文件列表。先构建源码，生成本地计划（不会请求网络）：
+
+```sh
+node packages/mcp/dist/examples/github-probe-cli.js --mode plan --repo OWNER/TEST_REPO --repo-id 123 --workspace PATH_TO_NEW_PROBE_WORKSPACE
+```
+
+计划生成随机32位标记，name/value均是绑定的合成数据，不能传业务值；打印planFile、完整计划和planHash，`postAuthorized=false`。计划文件以独占创建写入，不覆盖旧计划。令牌不在计划中。查看目标repo及数字ID、workspace、name/value和请求哈希后，由操作者另行取得用户对这次创建的明确授权；拿到授权才在本机配置RELAY_GITHUB_TOKEN并执行：
+
+```sh
+node packages/mcp/dist/examples/github-probe-cli.js --mode execute --plan PATH_TO_PLAN --approve-plan-hash REVIEWED_PLAN_HASH
+node packages/mcp/dist/examples/github-probe-cli.js --mode reconcile --plan PATH_TO_SAME_PLAN
+```
+
+传递hash只是避免无意执行被改动的计划，不是认证、签名或用户授权证明；拥有本机工具权限的人能计算hash或绕过此脚本。首次提交仍会重新预检，并在POST前再查仓库身份。确定失败在POST前发生时记录FAILED；开始POST后不能判定的结果保留UNKNOWN。恢复不需要重新授权写入，因为它没有提交路径；PREPARED原样保留，SUBMITTED/UNKNOWN只查询，终态只读缓存。
+
+确认退出0；blocked/unknown/failed/prepared_not_submitted或内部错误退出2；参数/计划文件读取失败退出64。结果只输出固定原因码及本次进程观察到的GET/POST尝试数，缺失进程输出不能推断尝试数为0。内部错误要求检查journal，不自动重跑execute。没有更新、删除、自动cleanup或自动换key功能。
+
+本地注入transport验证覆盖前述状态表、身份变化后的明确未提交失败、同进程重入拒绝及两个真实子进程持锁竞争。全部远端响应均为合成；跨进程测试未连接HTTP服务。没有声称远端执行次数、真实GitHub权限、跨主机恢复或生产安全通过。具体专用测试仓库与真实写入仍需单独授权。
+
+独立审查后补验：入口请求`takeWorkspaceOwnership(..., { reentrant: false })`，既不借用别的同进程持有者，也不向其出借；其他既有调用者默认重入行为不变。释放失败返回error/lock_release_failed_inspect_journal（退出2），不会误报参数错误或抹去CONFIRMED记录。两个缺陷均先复现再修复；补充await期间调用者修改计划时使用已审字段副本的测试。Windows Node24完整check通过（230 pass、2个平台相关skip），Node22/24新入口与既有锁27项通过；其中新入口11项。Linux新入口未测，测试没有真实GitHub流量。

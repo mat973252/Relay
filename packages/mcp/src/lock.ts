@@ -90,6 +90,8 @@ export interface Ownership {
 const MODULE_BOOT = Date.now();
 /** relayDir -> the exact lock body THIS process wrote and verified. */
 const acquisitions = new Map<string, LockFileBody>();
+/** Exclusive callers must neither borrow nor lend same-process ownership. */
+const nonReentrant = new Set<string>();
 
 /** Hard bound on claim-chain depth; deeper means pathological -> fail closed. */
 const MAX_CLAIM_LEVEL = 32;
@@ -216,7 +218,7 @@ async function sweepLitter(relayDir: string): Promise<void> {
  */
 export async function takeWorkspaceOwnership(
   relayDir: string,
-  options: { now?: () => number; rename?: (oldPath: string, newPath: string) => Promise<void> } = {},
+  options: { now?: () => number; rename?: (oldPath: string, newPath: string) => Promise<void>; reentrant?: boolean } = {},
 ): Promise<Ownership> {
   const now = options.now ?? (() => Date.now());
   const renameImpl = options.rename ?? rename;
@@ -259,6 +261,7 @@ export async function takeWorkspaceOwnership(
       }
       if (verify.status === "ok" && sameBody(verify.body, body)) {
         acquisitions.set(relayDir, body);
+        if (options.reentrant === false) nonReentrant.add(relayDir); else nonReentrant.delete(relayDir);
         await sweepLitter(relayDir);
         return { kind: "acquired", owner: body };
       }
@@ -276,6 +279,7 @@ export async function takeWorkspaceOwnership(
     if (stale.pid === process.pid) {
       const mine = acquisitions.get(relayDir);
       if (mine !== undefined && sameBody(mine, stale)) {
+        if (options.reentrant === false || nonReentrant.has(relayDir)) return { kind: "held-elsewhere", owner: stale };
         return { kind: "acquired", owner: mine }; // idempotent re-entry
       }
       if (!(stale.startedAt < MODULE_BOOT)) {
@@ -421,6 +425,7 @@ export async function takeWorkspaceOwnership(
         return { kind: "held-elsewhere", owner: undefined };
       }
       acquisitions.set(relayDir, body);
+      if (options.reentrant === false) nonReentrant.add(relayDir); else nonReentrant.delete(relayDir);
       await cleanup([claimantTmp]);
       await sweepLitter(relayDir);
       return { kind: "acquired", owner: body };
@@ -447,6 +452,7 @@ export async function releaseWorkspaceOwnership(relayDir: string): Promise<void>
     await rm(lockPath(relayDir), { force: true });
   }
   acquisitions.delete(relayDir);
+  nonReentrant.delete(relayDir);
 }
 
 export async function lockExists(relayDir: string): Promise<boolean> {
