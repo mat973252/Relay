@@ -102,4 +102,4 @@ node packages/mcp/dist/examples/github-probe-cli.js --mode reconcile --plan PATH
 
 本地注入transport验证覆盖前述状态表、身份变化后的明确未提交失败、同进程重入拒绝及两个真实子进程持锁竞争。全部远端响应均为合成；跨进程测试未连接HTTP服务。没有声称远端执行次数、真实GitHub权限、跨主机恢复或生产安全通过。具体专用测试仓库与真实写入仍需单独授权。
 
-独立审查后补验：入口请求`takeWorkspaceOwnership(..., { reentrant: false })`，既不借用别的同进程持有者，也不向其出借；其他既有调用者默认重入行为不变。释放失败返回error/lock_release_failed_inspect_journal（退出2），不会误报参数错误或抹去CONFIRMED记录。两个缺陷均先复现再修复；补充await期间调用者修改计划时使用已审字段副本的测试。Windows Node24完整check通过（230 pass、2个平台相关skip），Node22/24新入口与既有锁27项通过；其中新入口11项。Linux新入口未测，测试没有真实GitHub流量。
+独立审查后补验：入口请求`takeWorkspaceOwnership(..., { reentrant: false })`，既不借用别的同进程持有者，也不向其出借；其他既有调用者默认重入行为不变。释放失败返回error/lock_release_failed_inspect_journal（退出2），不会误报参数错误或抹去CONFIRMED记录。两个缺陷均先复现再修复；补充await期间调用者修改计划时使用已审字段副本的测试。Windows Node24完整check通过（230 pass、2个平台相关skip），Node22/24新入口与既有锁27项通过；其中新入口11项。后续Linux Node22.23.3/24.19.0也各通过这27项，源码和隔离范围见[本地报告](../reports/R2_PROBE_LOCAL_2026-10-03.md)；测试没有真实GitHub流量。
