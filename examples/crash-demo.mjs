@@ -5,8 +5,8 @@
  * Claim being demonstrated:
  *   an agent process dies AFTER an external HTTP action commits remotely;
  *   the process restarts and replays the SAME semantic operation id;
- *   Relay does not silently submit the action twice. While the outcome was
- *   ambiguous the journal held UNKNOWN, and confirmation came from a
+ *   Relay does not silently submit the action twice. The killed child leaves
+ *   the journal SUBMITTED, and confirmation comes from a
  *   read-only reconciliation, never from a blind retry.
  *
  * Real guarantee (nothing stronger is claimed):
@@ -39,8 +39,8 @@ const OPERATION_ID = "invoice-import:2026-09-24-batch-017"; // stable across ses
 const HOLD_MS = 4000; // provider commits, then holds the response this long
 
 // ---------------------------------------------------------------------------
-// Local HTTP counter provider (the "remote" side). It commits durably and
-// only THEN answers, giving us the dangerous window on purpose.
+// Local HTTP counter provider (the "remote" side). It updates its in-memory
+// state before answering and stays alive while the agent child restarts.
 // ---------------------------------------------------------------------------
 export async function startProvider() {
   let counter = 0;

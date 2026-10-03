@@ -20,7 +20,7 @@ Relay does **not** reimplement Pi's agent loop, session tree, suspended runs, de
 Relay v0.1 covers these milestones:
 
 - **M0 — Native integration:** load as a Pi package/extension without forking Pi.
-- **M1 — Crash-safe effects:** unsafe external effects are never silently duplicated.
+- **M1 — Crash-safe effects:** uncertain effects routed through Relay require reconciliation instead of blind resubmission. A process killed during submission can leave SUBMITTED; an observed ambiguous result is recorded as UNKNOWN. External execution guarantees depend on the provider contract.
 - **M2 — Durable artifacts:** outputs survive outside conversation context with lineage.
 - **M3 — Portable execution:** export on machine A, import on machine B, validate capabilities, and resume with Pi.
 - **M4 — Deferred migration:** a Pi suspended/deferred operation is resumed without submitting the remote job twice.
@@ -43,7 +43,7 @@ The first release is **v0.1.0**, under the [MIT license](LICENSE).
 For npm installation and MCP configuration, see the [usage guide](docs/NPM-USAGE.md):
 
 ```sh
-npm install -g @mat973252/relay-cli@0.1.0 @mat973252/relay-mcp@0.1.0
+npm install -g @mat973252/relay-cli@0.1.1 @mat973252/relay-mcp@0.1.0
 relay --help
 ```
 
@@ -58,6 +58,8 @@ node examples/crash-demo.mjs
 ```
 
 The demo needs no model account. See [release scope and verification](reports/RELEASE_V0.1.0.md).
+
+For the current source candidate's read-only GitHub preflight and opt-in probe, see the [real-provider contract](docs/REAL-PROVIDER-CONTRACT.md). These examples are not npm entry points and have not passed real GitHub acceptance. A specific test repository and explicit authorization for the planned write are still required.
 
 Everything runs from the repository root; no machine-specific paths are embedded:
 
@@ -89,6 +91,12 @@ and the assertions print `PASS` seven times with both the remote counter and
 submit-request count at exactly 1. Real guarantee: **no silent retry of an ambiguous unsafe action** —
 stronger guarantees need downstream idempotency or a reliable reconciliation
 query.
+
+This demo records `PREPARED → SUBMITTED → CONFIRMED`: the killed child cannot
+persist an UNKNOWN transition before recovery. The provider keeps its counter
+and operation map in memory and remains alive while the child restarts. This
+does not test provider restart or power-loss durability. The demo removes its
+temporary SQLite directory on exit; retain stdout if you need its evidence.
 
 ## 订单报表业务沙箱
 
