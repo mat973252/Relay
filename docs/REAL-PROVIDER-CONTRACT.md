@@ -42,3 +42,17 @@ Muse 另有任务审批绑定 effect kind/requestHash（`packages/core/src/task.
 认证哨兵在成功和UNKNOWN后残留的journal主文件/WAL/SHM中未出现；合成变量value有意进入确认结果，不能称全部内容自动脱敏。每个子进程只执行一次入口；现有锁允许同进程重入，夹具不声称并发同进程调用自动串行化。绕过锁、跨主机、生产凭据、远端历史唯一性均未验收。
 
 Windows隔离验证副本的typecheck与完整check通过，6项定向测试在Node24.19和22.23.3通过。构建后可运行 `node --test packages/mcp/dist/test/github-variable-contract.test.js`。真实GitHub预检、显式外部runner、具体测试仓库和授权仍未完成。
+
+## 只读GitHub预检入口（源码示例）
+
+`packages/mcp/examples/github-preflight.ts` 是独立源码示例，不进入SDK公共API或npm打包入口。按根目录构建后可运行：
+
+```sh
+node packages/mcp/dist/examples/github-preflight.js --repo OWNER/REPO --repo-id 123 --name RELAY_PROBE_UNIQUE
+```
+
+调用前由用户在本机配置`RELAY_GITHUB_TOKEN`，不要把值放到命令参数、聊天或日志。示例不自动读取gh/Codex凭据；没有令牌直接阻断且不请求网络。只对固定`https://api.github.com`发GET，拒绝重定向，核对仓库数字ID和完整名称，并分页读取变量列表；不输出已有变量名称/值、响应正文、异常正文或额外输入字段。
+
+根据[GitHub变量API](https://docs.github.com/en/rest/actions/variables#list-repository-variables)，变量列表需要对应读取权限；仓库admin/push信息不能证明Variables写权限。输出始终`variablesWrite=unverified`、`postAuthorized=false`。退出0仅表示本次枚举完成且未见同名项，2表示阻断，64表示参数错误。404不等于不存在；总数变化、重复项、不完整分页、身份变化或查询失败均不通过。分页上限100页，超限保守阻断。
+
+GitHub分页不是原子快照；等量增删可能不被总数检测，`atomicSnapshot=false`保留此限制。预检不能为后续POST提供唯一性保证，也不能代替用户授权、实际Variables写权限或单写者执行入口。此脚本完全没有POST/修改/删除分支；本轮仅以注入HTTP响应及无令牌实际CLI验证，尚未对具体远端仓库执行。
