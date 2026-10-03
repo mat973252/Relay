@@ -45,6 +45,18 @@ Windows隔离验证副本的typecheck与完整check通过，6项定向测试在N
 
 ## 只读GitHub预检入口（源码示例）
 
+候选源码已在[草稿 PR #10](https://github.com/mat973252/Relay/pull/10)公开，尚未发布为 npm 包。使用 Git、Node24或Node22.13+、可用Corepack从空目录获取并构建（pnpm固定10.33.0）：
+
+```sh
+git clone --branch mat/r1-recovery-evidence --single-branch https://github.com/mat973252/Relay.git relay-candidate
+cd relay-candidate
+git rev-parse HEAD
+corepack pnpm install --frozen-lockfile
+corepack pnpm typecheck
+```
+
+记录实际检出的完整提交；分支会随审阅更新。上述命令仅取得源码和构建示例，不运行GitHub预检或提交。以下命令都从此候选根目录执行。
+
 `packages/mcp/examples/github-preflight.ts` 是独立源码示例，不进入SDK公共API或npm打包入口。按根目录构建后可运行：
 
 ```sh
