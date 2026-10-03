@@ -41,7 +41,7 @@ Muse 另有任务审批绑定 effect kind/requestHash（`packages/core/src/task.
 
 认证哨兵在成功和UNKNOWN后残留的journal主文件/WAL/SHM中未出现；合成变量value有意进入确认结果，不能称全部内容自动脱敏。每个子进程只执行一次入口；现有锁允许同进程重入，夹具不声称并发同进程调用自动串行化。绕过锁、跨主机、生产凭据、远端历史唯一性均未验收。
 
-Windows隔离验证副本的typecheck与完整check通过，6项定向测试在Node24.19和22.23.3通过。构建后可运行 `node --test packages/mcp/dist/test/github-variable-contract.test.js`。真实GitHub预检、显式外部runner、具体测试仓库和授权仍未完成。
+Windows隔离验证副本的typecheck与完整check通过，6项定向测试在Node24.19和22.23.3通过。构建后可运行 `node --test packages/mcp/dist/test/github-variable-contract.test.js`。只读预检和显式外部runner现已实现并完成本地验证，见后文；具体测试仓库、真实写入授权及真实GitHub验收仍未完成。
 
 ## 只读GitHub预检入口（源码示例）
 
